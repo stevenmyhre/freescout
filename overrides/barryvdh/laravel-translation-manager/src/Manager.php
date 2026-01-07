@@ -449,7 +449,12 @@ class Manager
         // Modules translations are added here too.
         foreach ($groupKeys as $key) {
             // Split the group and item
-            list($group, $item) = explode('.', $key, 2);
+            $parts = explode('.', $key, 2);
+            if (count($parts) < 2) {
+                \Log::warning("Translation key without group: $key");
+                continue;
+            }
+            list($group, $item) = $parts;
             $this->missingKey('', $group, $item);
         }
 
@@ -578,6 +583,14 @@ class Manager
                 $translations = $groups[$group];
                 // Sort translations alphabetically.
                 ksort($translations);
+
+                // Strips some tags to avoid XSS when translations are inserted via {!! ... !!}.
+                foreach ($translations as $key => $value) {
+                    $value = \Helper::stripDangerousTags($value);
+
+                    $translations[$key] = $value;
+                }
+
                 $output = json_encode($translations, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_UNICODE);
                 $this->files->put($path, $output);
 
@@ -692,9 +705,10 @@ class Manager
 
     public function removeLocale($locale)
     {
-        if (!$locale) {
+        if (!$locale || !in_array($locale, array_keys(\Helper::$locales))) {
             return false;
         }
+
         $this->ignoreLocales = array_merge($this->ignoreLocales, [$locale]);
         // Only delete from DB.
         //$this->saveIgnoredLocales();

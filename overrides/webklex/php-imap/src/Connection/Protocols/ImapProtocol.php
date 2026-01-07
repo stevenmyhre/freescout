@@ -35,6 +35,16 @@ class ImapProtocol extends Protocol {
     protected $noun = 0;
 
     /**
+     * Host is stored just to check which instruction to use
+     * when fetching body: BODY[TEXT] or RFC822.TEXT.
+     */
+    public $host = '';
+
+    public static $output_debug_log = true;
+    public static $debug_log = '';
+    public static $last_connected_check = 0;
+
+    /**
      * Imap constructor.
      * @param bool $cert_validation set to false to skip SSL certificate validation
      * @param mixed $encryption Connection encryption method
@@ -62,6 +72,9 @@ class ImapProtocol extends Protocol {
         $transport = 'tcp';
         $encryption = '';
 
+        // Remember host.
+        $this->host = $host;
+
         if ($this->encryption) {
             $encryption = strtolower($this->encryption);
             if (in_array($encryption, ['ssl', 'tls'])) {
@@ -79,7 +92,7 @@ class ImapProtocol extends Protocol {
                 $this->enableStartTls();
             }
         } catch (Exception $e) {
-            throw new ConnectionFailedException('connection failed', 0, $e);
+            throw new ConnectionFailedException('connection failed - '.$e->getMessage(), 0, $e);
         }
     }
 
@@ -104,15 +117,35 @@ class ImapProtocol extends Protocol {
      * @throws RuntimeException
      */
     public function nextLine(): string {
-        $line = "";
-        while (($next_char = fread($this->stream, 1)) !== false && !in_array($next_char, ["","\n"])) {
-            $line .= $next_char;
+        
+        // https://github.com/stevebauman/php-imap/commit/9f661abf7a284871f53ec93984ca48851be7728d#diff-fa4f22d9f79d3e4dd1e5352f5e967291c02a7b3a39e32a0282d9b7d85c707c5aL123
+        $line = fgets($this->stream);
+        if ($line === false) {
+            throw new RuntimeException('no response');
         }
-        if ($line === "" && $next_char === false) {
-            throw new RuntimeException('empty response');
+
+        // $line = "";
+        // while (($next_char = fread($this->stream, 1)) !== false && !in_array($next_char, ["","\n"])) {
+        //     $line .= $next_char;
+        // }
+        // if ($line === "" && ($next_char === false || $next_char === "")) {
+        //     throw new RuntimeException('empty response');
+        // }
+        
+        if ($this->debug) $this->debug("<< ".$line/*(."\n"*/);
+
+        return $line /*. "\n"*/;
+    }
+
+    public function debug($line) {
+        if (self::$output_debug_log) {
+            echo $line;
         }
-        if ($this->debug) echo "<< ".$line."\n";
-        return $line . "\n";
+        self::$debug_log .= $line;
+    }
+
+    public static function getDebugLog() {
+        return self::$debug_log;
     }
 
     /**
@@ -278,7 +311,7 @@ class ImapProtocol extends Protocol {
 
         if ($dontParse) {
             // First two chars are still needed for the response code
-            $tokens = [substr($tokens, 0, 2)];
+            $tokens = [trim(substr($tokens, 0, 3))];
         }
 
         // last line has response code
@@ -299,7 +332,7 @@ class ImapProtocol extends Protocol {
      *
      * @throws RuntimeException
      */
-    public function sendRequest(string $command, array $tokens = [], string &$tag = null) {
+    public function sendRequest(string $command, array $tokens = [], ?string &$tag = null) {
         if (!$tag) {
             $this->noun++;
             $tag = 'TAG' . $this->noun;
@@ -328,7 +361,7 @@ class ImapProtocol extends Protocol {
      * @throws RuntimeException
      */
     public function write(string $data) {
-        if ($this->debug) echo ">> ".$data ."\n";
+        if ($this->debug) $this->debug(">> ".$data ."\n");
 
         if (fwrite($this->stream, $data . "\r\n") === false) {
             throw new RuntimeException('failed to write - connection closed?');
@@ -468,7 +501,27 @@ class ImapProtocol extends Protocol {
      * @return bool
      */
     public function connected(): bool {
-        return (boolean) $this->stream;
+        if ((bool)$this->stream) {
+            $time = time();
+            if (self::$last_connected_check+1 < $time) {
+                if (!self::$last_connected_check) {
+                    self::$last_connected_check = $time;
+                    return true;
+                }
+                $response = $this->requestAndResponse('NOOP');
+                // https://github.com/Webklex/php-imap/pull/449
+                if ($response === false) {
+                    return false;
+                } else {
+                    self::$last_connected_check = $time;
+                    return true;
+                }
+            } else {
+                self::$last_connected_check = $time;
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -576,14 +629,17 @@ class ImapProtocol extends Protocol {
      * @throws RuntimeException
      */
     public function fetch($items, $from, $to = null, $uid = IMAP::ST_UID) {
-        if (is_array($from)) {
+        if (is_array($from) && count($from) > 1) {
             $set = implode(',', $from);
+        } elseif (is_array($from) && count($from) === 1) {
+            $from = array_values($from);
+            $set = $from[0] . ':' . $from[0];
         } elseif ($to === null) {
-            $set = (int)$from;
-        } elseif ($to === INF) {
-            $set = (int)$from . ':*';
+            $set = $from . ':' . $from;
+        } elseif ($to == INF) {
+            $set = $from . ':*';
         } else {
-            $set = (int)$from . ':' . (int)$to;
+            $set = $from . ':' . (int)$to;
         }
 
         $items = (array)$items;
@@ -624,7 +680,7 @@ class ImapProtocol extends Protocol {
             if (count($items) == 1) {
                 if ($tokens[2][0] == $items[0]) {
                     $data = $tokens[2][1];
-                } elseif ($uid && $tokens[2][2] == $items[0]) {
+                } elseif ($uid === IMAP::ST_UID && isset($tokens[2][2]) && $tokens[2][2] == $items[0]) {
                     $data = $tokens[2][3];
                 } else {
                     $expectedResponse = 0;
@@ -683,7 +739,16 @@ class ImapProtocol extends Protocol {
      * @throws RuntimeException
      */
     public function content($uids, string $rfc = "RFC822", $uid = IMAP::ST_UID): array {
-        $result = $this->fetch(["$rfc.TEXT"], $uids, null, $uid);
+        // iCloud requires BODY[TEXT] instead of RFC822.TEXT.
+        // https://github.com/freescout-help-desk/freescout/issues/4202#issuecomment-2315369990
+        // https://github.com/Webklex/php-imap/commit/d4df579fbbe22bb5eca10b7bb3c0192b1f9a5bf7
+        if (strtolower(trim($this->host)) == 'imap.mail.me.com') {
+            $item = "BODY[TEXT]";
+        } else {
+            $item = "$rfc.TEXT";
+        }
+        
+        $result = $this->fetch([$item], is_array($uids)?$uids:[$uids], null, $uid);
         return is_array($result) ? $result : [];
     }
 
@@ -698,7 +763,7 @@ class ImapProtocol extends Protocol {
      * @throws RuntimeException
      */
     public function headers($uids, string $rfc = "RFC822", $uid = IMAP::ST_UID): array{
-        $result = $this->fetch(["$rfc.HEADER"], $uids, null, $uid);
+        $result = $this->fetch(["$rfc.HEADER"], is_array($uids)?$uids:[$uids], null, $uid);
         return $result === "" ? [] : $result;
     }
 
@@ -759,13 +824,15 @@ class ImapProtocol extends Protocol {
      */
     public function getMessageNumber(string $id): int {
         $ids = $this->getUid();
-        foreach ($ids as $k => $v) {
-            if ($v == $id) {
-                return (int)$k;
+        if ($ids) {
+            foreach ($ids as $k => $v) {
+                if ($v == $id) {
+                    return (int)$k;
+                }
             }
         }
 
-        throw new MessageNotFoundException('message number not found');
+        throw new MessageNotFoundException('message number not found: ' . $id);
     }
 
     /**
@@ -910,7 +977,27 @@ class ImapProtocol extends Protocol {
         $set = $this->buildSet($from, $to);
         $command = $this->buildUIDCommand("MOVE", $uid);
 
-        return (bool)$this->requestAndResponse($command, [$set, $this->escapeString($folder)], true);
+        //return (bool)$this->requestAndResponse($command, [$set, $this->escapeString($folder)], true);
+        $result = (bool)$this->requestAndResponse($command, [$set, $this->escapeString($folder)], true);
+
+        // Fallback to COPY, STORE and EXPUNGE.
+        // https://github.com/freescout-help-desk/freescout/issues/4313
+        if (!$result) {
+            $result = $this->copyMessage($folder, $from, $to);
+            if (!$result) {
+                return false;
+            }
+            $result = $this->store(['\Deleted'], $from, $to);
+            if (!$result) {
+                return false;
+            }
+            
+            $this->expunge();
+
+            return true;
+        }
+
+        return $result;
     }
 
     /**

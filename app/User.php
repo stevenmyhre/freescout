@@ -7,6 +7,7 @@
 namespace App;
 
 use App\Email;
+use App\Events\UserDeleted;
 use App\Follower;
 use App\Mail\PasswordChanged;
 use App\Mail\UserInvite;
@@ -116,7 +117,7 @@ class User extends Authenticatable
      *
      * @var [type]
      */
-    protected $fillable = ['role', 'status', 'first_name', 'last_name', 'email', 'password', 'timezone', 'photo_url', 'type', 'emails', 'job_title', 'phone', 'time_format', 'enable_kb_shortcuts', 'locale'];
+    protected $fillable = ['role', 'status', 'first_name', 'last_name', 'email', 'password', 'timezone', 'photo_url', 'type', 'emails', 'job_title', 'phone', 'time_format', 'locale'];
 
     protected $casts = [
         'permissions' => 'array',
@@ -551,6 +552,8 @@ class User extends Authenticatable
                 's' => 'ss',
                 'l' => 'cccc',
                 'O' => 'xx',
+                // https://stackoverflow.com/questions/59682843/php-intldateformatter-returns-incorrect-year
+                'Y' => 'y',
             ]);
 
             // Remove dot from month name.
@@ -626,7 +629,7 @@ class User extends Authenticatable
         }
 
         if (stripos($dateForHuman, 'just') === false) {
-            return __(':date @ :time', ['date' => $dateForHuman, 'time' => $date->format('H:i')]);
+            return __(':date @ :time', ['date' => $dateForHuman, 'time' => self::dateFormat($date, 'H:i')]);
         } else {
             return $dateForHuman;
         }
@@ -867,7 +870,9 @@ class User extends Authenticatable
     {
         $real_path = $uploaded_file;
         if (!is_string($uploaded_file)) {
-            $real_path = $uploaded_file->getRealPath();
+            // Fallback to getPathname() for Windows.
+            // https://github.com/freescout-help-desk/freescout/issues/4105
+            $real_path = $uploaded_file->getRealPath() ?: $uploaded_file->getPathname();
             $mime_type = $uploaded_file->getMimeType();
         }
 
@@ -993,6 +998,22 @@ class User extends Authenticatable
         }
         if (isset($data['password']) && empty($data['no_password_hashing'])) {
             $data['password'] = \Hash::make($data['password']);
+        }
+
+        // Strip tags.
+        $fields_strip = [
+            'first_name',
+            'last_name',
+            'phone',
+            'timezone',
+        ];
+
+        foreach ($fields_strip as $field) {
+            if (in_array($field, array_keys($data))) {
+                if ($data[$field] !== null) {
+                    $data[$field] = strip_tags($data[$field]);
+                }
+            }
         }
 
         if ($replace_data) {
@@ -1174,6 +1195,23 @@ class User extends Authenticatable
         return false;
     }
 
+    public static function findByAlternateEmail($email)
+    {
+        $email = Email::sanitizeEmail($email);
+
+        $users = self::nonDeleted()
+            ->where('emails', \Helper::sqlLikeOperator(), '%'.$email.'%')
+            ->get();
+
+        foreach ($users as $user) {
+            if ($user->hasEmail($email)) {
+                return $user;
+            }
+        }
+
+        return null;
+    }
+
     /**
      * Check if there is a mailbox with specified email.
      */
@@ -1226,5 +1264,102 @@ class User extends Authenticatable
     public function setJobTitleAttribute($job_title)
     {
         $this->attributes['job_title'] = mb_substr($job_title ?? '', 0, 100);
+    }
+
+    public function canSeeOnlyAssignedConversations()
+    {
+        return $this->hasManageMailboxPermission(0, Mailbox::ACCESS_PERM_ASSIGNED);
+    }
+
+    public function deleteUser($auth_user, $assign_user)
+    {
+        // We have to process conversations one by one to move them to Unassigned folder,
+        // as conversations may be in different mailboxes
+        // $this->conversations()->update(['user_id' => null, 'folder_id' => ]);
+        $mailbox_unassigned_folders = [];
+
+        $this->conversations->each(function ($conversation) use ($auth_user, $assign_user) {
+            // We don't fire ConversationUserChanged event to avoid sending notifications to users
+            if (!empty($assign_user) 
+                && !empty($assign_user[$conversation->mailbox_id]) 
+                && (int) $assign_user[$conversation->mailbox_id] != -1
+            ) {
+                // Set assignee.
+                // In this case conversation stays assigned, just assignee changes.
+                $conversation->user_id = $assign_user[$conversation->mailbox_id];
+
+            } else {
+
+                // Make convesation Unassigned.
+                
+                // Unset assignee.
+                // Maybe use changeUser() here.
+                $conversation->user_id = null;
+
+                if ($conversation->isPublished()
+                    && ($conversation->isActive() || $conversation->isPending())
+                ) {
+                    // Change conversation folder to UNASSIGNED.
+                    $folder_id = null;
+                    if (!empty($mailbox_unassigned_folders[$conversation->mailbox_id])) {
+                        $folder_id = $mailbox_unassigned_folders[$conversation->mailbox_id];
+                    } else {
+                        $folder = $conversation->mailbox->folders()
+                            ->where('type', Folder::TYPE_UNASSIGNED)
+                            ->first();
+
+                        if ($folder) {
+                            $folder_id = $folder->id;
+                            $mailbox_unassigned_folders[$conversation->mailbox_id] = $folder_id;
+                        }
+                    }
+                    if ($folder_id) {
+                        $conversation->folder_id = $folder_id;
+                    }
+                }
+            }
+
+            $conversation->save();
+
+            // Create lineitem thread
+            $thread = new Thread();
+            $thread->conversation_id = $conversation->id;
+            $thread->user_id = $conversation->user_id;
+            $thread->type = Thread::TYPE_LINEITEM;
+            $thread->state = Thread::STATE_PUBLISHED;
+            $thread->status = Thread::STATUS_NOCHANGE;
+            $thread->action_type = Thread::ACTION_TYPE_USER_CHANGED;
+            $thread->source_via = Thread::PERSON_USER;
+            $thread->source_type = Thread::SOURCE_TYPE_WEB;
+            $thread->customer_id = $conversation->customer_id;
+            $thread->created_by_user_id = $auth_user->id;
+            $thread->save();
+        });
+
+        // Recalculate counters for folders
+        //if ($this->isAdmin()) {
+        // Admin has access to all mailboxes
+        Mailbox::all()->each(function ($mailbox) {
+            $mailbox->updateFoldersCounters();
+        });
+        // } else {
+        //     $this->mailboxes->each(function ($mailbox) {
+        //         $mailbox->updateFoldersCounters();
+        //     });
+        // }
+
+        // Disconnect user from mailboxes.
+        $this->mailboxes()->sync([]);
+        $this->folders()->delete();
+
+        $this->status = \App\User::STATUS_DELETED;
+        // Update email.
+        $email_suffix = User::EMAIL_DELETED_SUFFIX.date('YmdHis');
+        // We have to truncate email to avoid "Data too long" error.
+        $this->email = mb_substr($this->email, 0, User::EMAIL_MAX_LENGTH - mb_strlen($email_suffix)).$email_suffix;
+
+        $this->save();
+
+        event(new UserDeleted($this, $auth_user));
     }
 }

@@ -31,8 +31,9 @@
                     <h2>{{ __("New Conversation") }}</h2>
 
                     <div class="btn-group">
-                        <button type="button" class="btn btn-default active" id="email-conv-switch"><i class="glyphicon glyphicon-envelope"></i></button>
-                        <button type="button" class="btn btn-default" id="phone-conv-switch"><i class="glyphicon glyphicon-earphone"></i></button>
+                        <button type="button" class="btn btn-default active conv-switch-button" id="email-conv-switch"><i class="glyphicon glyphicon-envelope"></i></button>
+                        <button type="button" class="btn btn-default conv-switch-button" id="phone-conv-switch"><i class="glyphicon glyphicon-earphone"></i></button>
+                        @action('conversation.new.conv_switch_buttons')
                     </div>
                 </div>
 
@@ -206,6 +207,7 @@
                                 <a href="#" class="help-link" id="toggle-cc">Cc/Bcc</a>
                             </div>
 
+                            @action('conversation.create_form.before_subject', $conversation, $mailbox, $thread)
                             <div class="form-group{{ $errors->has('subject') ? ' has-error' : '' }}">
                                 <label for="subject" class="col-sm-2 control-label">{{ __('Subject') }}</label>
 
@@ -224,13 +226,14 @@
                             @endphp
                             <div class="thread-attachments attachments-upload" @if (count($attachments)) style="display: block" @endif>
                                 @foreach ($attachments as $attachment)
-                                    <input type="hidden" name="attachments_all[]" value="{{ $attachment->id }}">
-                                    <input type="hidden" name="attachments[]" value="{{ $attachment->id }}" class="atachment-upload-{{ $attachment->id }}">
+                                    @php $attachment->encrypted_id = encrypt($attachment->id); @endphp
+                                    <input type="hidden" name="attachments_all[]" value="{{ $attachment->encrypted_id }}">
+                                    <input type="hidden" name="attachments[]" value="{{ $attachment->encrypted_id }}" class="atachment-upload-{{ $attachment->encrypted_id }}">
                                 @endforeach
                                 <ul>
                                     @foreach ($attachments as $attachment)
-                                        <li class="atachment-upload-{{ $attachment->id }} attachment-loaded">
-                                            <img src="{{ asset('img/loader-tiny.gif') }}" width="16" height="16"> <a href="{{ $attachment->url() }}" class="break-words" target="_blank">{{ $attachment->file_name }}<span class="ellipsis">…</span> </a> <span class="text-help">({{ $attachment->getSizeName() }})</span> <i class="glyphicon glyphicon-remove" data-attachment-id="{{ $attachment->id }}"></i>
+                                        <li class="atachment-upload-{{ $attachment->encrypted_id }} attachment-loaded">
+                                            <img src="{{ asset('img/loader-tiny.gif') }}" width="16" height="16"> <a href="{{ $attachment->url() }}" class="break-words" target="_blank">{{ $attachment->file_name }}<span class="ellipsis">…</span> </a> <span class="text-help">({{ $attachment->getSizeName() }})</span> <i class="glyphicon glyphicon-remove" data-attachment-id="{{ $attachment->encrypted_id }}"></i>
                                         </li>
                                     @endforeach
                                 </ul>

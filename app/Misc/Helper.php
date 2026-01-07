@@ -32,13 +32,17 @@ class Helper
 
     /**
      * Limit for IN queries.
+     * MariaDB may not work with more than 999 elements in IN clause.
+     * https://github.com/freescout-help-desk/freescout/issues/4623
      */
-    const IN_LIMIT = 1000;
+    const IN_LIMIT = 999;
 
     /**
      * Permissions for directories.
      */
     const DIR_PERMISSIONS = 0755;
+
+    const DB_INT_MAX = 2147483647;
 
     public static $csp_nonce = null;
 
@@ -59,6 +63,8 @@ class Helper
         'php.*',
         'sh',
         'pl',
+        'phtml',
+        'phar',
     ];
 
     /**
@@ -324,6 +330,9 @@ class Helper
         'ja' => ['name'          => '日本語',
                  'name_en'       => 'Japanese',
         ],
+        'kz' => ['name'          => 'қазақ тілі',
+                 'name_en'       => 'Kazakh',
+        ],
         'ko' => ['name'          => '한국어 (韓國語)',
                  'name_en'       => 'Korean (Johab)',
         ],
@@ -518,19 +527,21 @@ class Helper
     {
         // Remove all kinds of spaces after tags.
         // https://stackoverflow.com/questions/3230623/filter-all-types-of-whitespace-in-php
+        // 
+        // Keep in mind that preg_replace() may return NULL if "u" flag is used.
         $text = preg_replace("/^(.*)>[\r\n]*\s+/mu", '$1>', $text ?? '');
 
         // Remove <script> and <style> blocks.
-        $text = preg_replace('#<script(.*?)>(.*?)</script>#is', '', $text);
-        $text = preg_replace('#<style(.*?)>(.*?)</style>#is', '', $text);
+        $text = preg_replace('#<script(.*?)>(.*?)</script>#is', '', $text ?? '');
+        $text = preg_replace('#<style(.*?)>(.*?)</style>#is', '', $text ?? '');
 
         // Remove tags.
-        $text = strip_tags($text);
-        $text = preg_replace('/\s+/mu', ' ', $text);
+        $text = strip_tags($text ?? '');
+        $text = preg_replace('/\s+/mu', ' ', $text ?? '');
 
         // Trim
-        $text = trim($text);
-        $text = preg_replace('/^\s+/mu', '', $text);
+        $text = trim($text ?? '');
+        $text = preg_replace('/^\s+/mu', '', $text ?? '');
 
         // Causes "General error: 1366 Incorrect string value"
         // Remove "undetectable" whitespaces
@@ -541,9 +552,58 @@ class Helper
         // }
         // $text = urldecode($text);
 
-        $text = trim(preg_replace('/[ ]+/', ' ', $text));
+        $text = trim(preg_replace('/[ ]+/', ' ', $text ?? ''));
 
         return $text;
+    }
+
+    public static function stripDangerousTags($html, $allowed_tags = [])
+    {
+        // <script src="/storage/attachment/8/1/1/test.js?id=7&token=c4786c4497db3c6254a0c310623a43c3">
+        // <iframe src="/storage/attachment/8/1/1/1.html?id=95&token=3dced8dc80305031b358119f3d156204"></iframe>
+        // <object data="/storage/attachment/8/1/1/1.html?id=95&token=3dced8dc80305031b358119f3d156204" type="text/html"></object>
+        $tags = ['script', 'form', 'iframe', 'object'];
+        $attrs = 'src|data';
+
+        $tags = array_diff($tags, $allowed_tags);
+
+        foreach ($tags as $tag) {
+            $html = preg_replace('#<'.$tag.'(.*?)>(.*?)<\s*/\s*'.$tag.'\s*>#is', '', $html ?? '');
+
+            // Remove unclosed restricted tags.
+            $html = preg_replace('#<'.$tag.'(.*?)>#is', '', $html ?? '');
+        }
+
+        // If some tag is allowed make sure that it does not point to the file on the current server.
+        if (!empty($allowed_tags)) {
+            foreach ($allowed_tags as $tag) {
+                $html = preg_replace_callback('#<'.$tag.'(.*?)>#is', 
+                    function ($matches) use ($attrs) {
+                        preg_match("/(src|data)\s*=\s*['\"]([^'\"]+)['\"]/i", $matches[1], $attr_match);
+                        if (!empty($attr_match[2])) {
+                            $url = trim($attr_match[2]);
+                            $parts = parse_url($url);
+
+                            // Remove tag.
+                            if (!preg_match("#^(https?:)?//#i", $url)
+                                || empty($parts['host'])
+                                || (strtolower($parts['host']) == strtolower(self::getDomain()))
+                                || preg_match("#/storage/attachment/.*token#", $parts['host'])
+                                || preg_match("#/storage/uploads/.*\.#", $parts['host'])
+                            ) {
+                                return '';
+                            }
+                        }
+
+                        return $matches[0];
+                    },
+                    $html
+                );
+            }
+        }
+        
+
+        return $html;
     }
 
     /**
@@ -627,7 +687,7 @@ class Helper
     /**
      * Resize image without using Intervention package.
      */
-    public static function resizeImage($file, $mime_type, $thumb_width, $thumb_height)
+    public static function resizeImage($file, $mime_type, $thumb_width, $thumb_height, $transparency = false)
     {
         list($width, $height) = getimagesize($file);
         if (!$width) {
@@ -637,8 +697,10 @@ class Helper
         if (preg_match('/png/i', $mime_type)) {
             $src = imagecreatefrompng($file);
 
-            $kek = imagecolorallocate($src, 255, 255, 255);
-            imagefill($src, 0, 0, $kek);
+            if (!$transparency) {
+                $kek = imagecolorallocate($src, 255, 255, 255);
+                imagefill($src, 0, 0, $kek);
+            }
         } elseif (preg_match('/gif/i', $mime_type)) {
             $src = imagecreatefromgif($file);
 
@@ -666,6 +728,10 @@ class Helper
         }
 
         $thumb = imagecreatetruecolor($thumb_width, $thumb_height);
+        if ($transparency && preg_match('/png/i', $mime_type)) {
+            imagealphablending($thumb, false);
+            imagesavealpha($thumb, true);
+        }
         // Resize and crop
         imagecopyresampled($thumb,
                            $src,
@@ -801,6 +867,21 @@ class Helper
         \Log::error($prefix.self::formatException($e));
     }
 
+    public static function encrypt($value, $password = null)
+    {
+        try {
+            if (!$password) {
+                $value = encrypt($value);
+            } else {
+                $value = (new \Illuminate\Encryption\Encrypter(md5($password)))->encrypt($value);
+            }
+        } catch (\Exception $e) {
+            // Do nothing.
+        }
+
+        return $value;
+    }
+
     /**
      * Safely decrypt.
      *
@@ -808,14 +889,23 @@ class Helper
      *
      * @return [type] [description]
      */
-    public static function decrypt($value)
+    public static function decrypt($value, $password = null, $force_unserialize = false)
     {
         try {
-            $value = decrypt($value);
+            if (!$password) {
+                $value = app('encrypter')->decrypt($value, false);
+            } else {
+                $value = (new \Illuminate\Encryption\Encrypter(md5($password)))->decrypt($value, false);
+            }
+
+            // If the value is scalar - unserialize it,
+            // Otherwise - do not, as objects may contain dangerous code.
+            if (preg_match("#^[idsa]:#", $value) || $force_unserialize) {
+                $value = unserialize($value);
+            }
         } catch (\Exception $e) {
             // Do nothing.
         }
-
         return $value;
     }
 
@@ -876,6 +966,16 @@ class Helper
         }
     }
 
+    public static function setUserLocale($user_locale = '')
+    {
+        if (!$user_locale) {
+            $user_locale = \Eventy::filter('locale', session('user_locale'));
+        }
+        if ($user_locale) {
+            \Helper::setLocale($user_locale);
+        }
+    }
+
     public static function setLocale($locale)
     {
         if (in_array($locale, config('app.locales'))) {
@@ -927,6 +1027,8 @@ class Helper
     {
         $env_path = app()->environmentFilePath();
         $contents = file_get_contents($env_path);
+
+        $value = preg_replace("#[\r\n\t]#", '', $value);
 
         if (strstr($value, '"')) {
             // Escape quotes.
@@ -1183,7 +1285,19 @@ class Helper
      */
     public static function strSplitKeepWords($str, $max_length = 75)
     {
-        $array_words = explode(' ', $str);
+        $space = html_entity_decode('&nbsp;');
+
+        $str = strtr($str, [
+            '、' => '、'.$space,
+            '。' => '。'.$space,
+            // '.' => '.'.$space,
+            // ',' => ','.$space,
+            //':' => ':'.$space,
+            // '—' => '—'.$space,
+            // '।' => '।'.$space,
+        ]);
+
+        $array_words = explode($space, $str);
 
         $currentLength = 0;
 
@@ -1240,46 +1354,63 @@ class Helper
     }
 
     /**
-     * It looks like this is not used anywhere.
      * Json encode to avoid "Unable to JSON encode payload. Error code: 5"
      */
-    // public static function jsonEncodeSafe($value, $options = 0, $depth = 512, $utfErrorFlag = false)
-    // {
-    //     $encoded = json_encode($value, $options, $depth);
-    //     switch (json_last_error()) {
-    //         case JSON_ERROR_NONE:
-    //             return $encoded;
-    //         // case JSON_ERROR_DEPTH:
-    //         //     return 'Maximum stack depth exceeded'; // or trigger_error() or throw new Exception()
-    //         // case JSON_ERROR_STATE_MISMATCH:
-    //         //     return 'Underflow or the modes mismatch'; // or trigger_error() or throw new Exception()
-    //         // case JSON_ERROR_CTRL_CHAR:
-    //         //     return 'Unexpected control character found';
-    //         // case JSON_ERROR_SYNTAX:
-    //         //     return 'Syntax error, malformed JSON'; // or trigger_error() or throw new Exception()
-    //         case JSON_ERROR_UTF8:
-    //             $clean = self::utf8ize($value);
-    //             if ($utfErrorFlag) {
-    //                 //return 'UTF8 encoding error'; // or trigger_error() or throw new Exception()
-    //             }
-    //             return self::jsonEncodeSafe($clean, $options, $depth, true);
-    //         // default:
-    //         //     return 'Unknown error'; // or trigger_error() or throw new Exception()
+    public static function jsonEncodeSafe($value, $options = 0, $depth = 512, $attempt = 1)
+    {
+        $msg = '';
+        
+        $encoded = json_encode($value, $options, $depth);
 
-    //     }
-    // }
+        switch (json_last_error()) {
+            case JSON_ERROR_NONE:
+                return $encoded;
+            case JSON_ERROR_DEPTH:
+                $msg = 'Maximum stack depth exceeded';
+                break;
+            case JSON_ERROR_STATE_MISMATCH:
+                $msg = 'Underflow or the modes mismatch';
+                break;
+            case JSON_ERROR_CTRL_CHAR:
+                $msg = 'Unexpected control character found';
+                break;
+            case JSON_ERROR_SYNTAX:
+                $msg = 'Syntax error, malformed JSON';
+                break;
+            case JSON_ERROR_UTF8:
+                $clean = self::utf8ize($value);
+                if ($attempt > 1) {
+                    $msg = 'UTF8 encoding error';
+                } else {
+                    return self::jsonEncodeSafe($clean, $options, $depth, 2);
+                }
+                break;
+            // default:
+            //     return '';
+        }
+        throw new \Exception("Could not encode JSON: ".$msg, 1);
+        //return '';
+    }
 
-    // public static function utf8ize($mixed)
-    // {
-    //     if (is_array($mixed)) {
-    //         foreach ($mixed as $key => $value) {
-    //             $mixed[$key] = self::utf8ize($value);
-    //         }
-    //     } else if (is_string ($mixed)) {
-    //         return utf8_encode($mixed);
-    //     }
-    //     return $mixed;
-    // }
+    public static function utf8ize($mixed)
+    {
+        if (is_array($mixed)) {
+            foreach ($mixed as $key => $value) {
+                $mixed[$key] = self::utf8ize($value);
+            }
+        } else if (is_string($mixed)) {
+            return self::utf8Encode($mixed);
+        }
+        return $mixed;
+    }
+
+    /**
+     * Replacement for utf8_encode().
+     */
+    public static function utf8Encode($string)
+    {
+        return mb_convert_encoding($string, 'UTF-8', 'UTF-8');
+    }
 
     /**
      * Check if host is available on the port specified.
@@ -1595,10 +1726,10 @@ class Helper
         }
     }
 
-    public static function downloadRemoteFileAsTmp($uri)
+    public static function downloadRemoteFileAsTmp($uri, $follow_redirects = true)
     {
         try {
-            $contents = self::getRemoteFileContents($uri);
+            $contents = self::getRemoteFileContents($uri, $follow_redirects);
 
             if (!$contents) {
                 return false;
@@ -1620,31 +1751,49 @@ class Helper
 
     // Replacement for file_get_contents() as some hostings 
     // do not allow reading remote files via allow_url_fopen option.
-    public static function getRemoteFileContents($url)
+    public static function getRemoteFileContents($url, $follow_redirects = true)
     {
         try {
+            // Sanitize URL first.
+            if (!self::sanitizeRemoteUrl($url)) {
+                throw new \Exception('URL points to the local host', 1);
+            }
+
             $headers = get_headers($url);
 
             // 307 - Temporary Redirect.
             if (!preg_match("/(200|301|302|307)/", $headers[0])) {
-                return false;
+                throw new \Exception('HTTP Status Code: '.$headers[0], 1);
+                //return false;
             }
 
             $ch = curl_init();
             curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+            if ($follow_redirects) {
+                curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+            }
             curl_setopt($ch, CURLOPT_URL, $url);
             \Helper::setCurlDefaultOptions($ch);
             curl_setopt($ch, CURLOPT_TIMEOUT, 180);
             $contents = curl_exec($ch);
 
-            if (curl_errno($ch)) {
-                throw new \Exception(curl_errno($ch).' '.curl_error($ch), 1);
+            $curl_errno = curl_errno($ch);
+
+            if ($curl_errno) {
+                throw new \Exception('Curl Error Number: '.$curl_errno, 1);
             }
 
-            curl_close($ch);
-
-            if (!$contents) {
-                return false;
+            if ($contents == '') {
+                $https_status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                if (PHP_VERSION_ID < 80000) {
+                    \curl_close($ch);
+                }
+                throw new \Exception('Empty Response. Curl Error Number: '.$curl_errno.'. Response Status Code: '.$https_status, 1);
+                //return false;
+            } else {
+                if (PHP_VERSION_ID < 80000) {
+                    \curl_close($ch);
+                }
             }
 
             return $contents;
@@ -1655,6 +1804,62 @@ class Helper
 
             return false;
         }
+    }
+
+    public static function sanitizeRemoteUrl($url, $throw_exception = false)
+    {
+        $parts = parse_url($url ?? '');
+
+        // Sanitize protocol to avoid access to local files.
+        if (empty($parts['scheme']) || !in_array($parts['scheme'], ['http', 'https'])) {
+            return '';
+        }
+
+        // Sanitize host.
+        if (empty($parts['host'])) {
+            return '';
+        }
+
+        $host_white_list_str = str_replace(' ', '', mb_strtolower(config('app.remote_host_white_list')));
+        $host_white_list = explode(',', $host_white_list_str);
+
+        // Sanitize host name.
+        $parts['host'] = mb_strtolower($parts['host']);
+        $hostname = gethostname();
+        $host_ip = gethostbyname($hostname);
+
+        $restricted_hosts = [
+            '0.0.0.0',
+            '127.0.0.1',
+            'localhost',
+            $hostname,
+            $host_ip,
+            mb_strtolower(self::getDomain()),
+            $_SERVER['SERVER_ADDR'] ?? '',
+            $_SERVER['LOCAL_ADDR'] ?? ''
+        ];
+
+        if (in_array($parts['host'], $restricted_hosts) && !in_array($parts['host'], $host_white_list)) {
+            if ($throw_exception) {
+                throw new \Exception(__('Domain or IP address is not allowed: :%host%. Whitelist it via APP_REMOTE_HOST_WHITE_LIST .env parameter.', ['%host%' => $parts['host']]), 1);
+            } else {
+                return '';
+            }
+        }
+
+        // Sanitize host IP address.
+        $remote_host_ip = gethostbyname($parts['host']);
+        if (in_array($remote_host_ip, ['0.0.0.0', '127.0.0.1', $host_ip, $_SERVER['SERVER_ADDR'] ?? '', $_SERVER['LOCAL_ADDR'] ?? ''])
+            && !in_array($remote_host_ip, $host_white_list)
+        ) {
+            if ($throw_exception) {
+                throw new \Exception(__('Domain or IP address is not allowed: :%host%. Whitelist it via APP_REMOTE_HOST_WHITE_LIST .env parameter.', ['%host%' => $remote_host_ip]), 1);
+            } else {
+                return '';
+            }
+        }
+
+        return $url;
     }
 
     public static function getTempDir()
@@ -1674,9 +1879,9 @@ class Helper
 
     // Keep in mind that $uploaded_file->getClientMimeType() returns
     // incorrect mime type for images: application/octet-stream
-    public static function downloadRemoteFileAsTmpFile($uri)
+    public static function downloadRemoteFileAsTmpFile($uri, $follow_redirects = true)
     {
-        $file_path = self::downloadRemoteFileAsTmp($uri);
+        $file_path = self::downloadRemoteFileAsTmp($uri, $follow_redirects);
         if ($file_path) {
             return new \Illuminate\Http\UploadedFile(
                 $file_path, basename($file_path),
@@ -1698,7 +1903,7 @@ class Helper
         } elseif ($ext == 'pdf') {
             // Rename PDF to avoid running embedded JavaScript.
             if ($uploaded_file && !$contents) {
-                $contents = file_get_contents($uploaded_file->getRealPath());
+                $contents = file_get_contents($uploaded_file->getRealPath() ?: $uploaded_file->getPathname());
             }
             if ($contents && strstr($contents, '/JavaScript')) {
                 $file_name = $file_name.'_';
@@ -1734,6 +1939,11 @@ class Helper
         $file_name = mb_convert_encoding($file_name, 'UTF-8', 'UTF-8');
         $file_name = preg_replace('/[' . $escaped_regex . ']/', '_', $file_name);
         $file_name = preg_replace("/[\t\r\n]/", '', $file_name);
+        // Remove unprintable characters and invalid unicode characters.
+        // https://github.com/freescout-help-desk/freescout/issues/4681
+        $file_name = preg_replace("#\p{C}+#u", '', $file_name);
+        // https://github.com/freescout-help-desk/freescout/issues/2123#issuecomment-2775392740
+        $file_name = preg_replace("#\p{Cf}+#u", '', $file_name);
 
         return $file_name;
     }
@@ -1935,6 +2145,11 @@ class Helper
             'proc_open (PHP)'  => function_exists('proc_open'),
             'fpassthru (PHP)'  => function_exists('fpassthru'),
             'symlink (PHP)'    => function_exists('symlink'),
+            'iconv (PHP)'      => function_exists('iconv'),
+            // If posix_isatty() function is not enabled on the server the question in the
+            // console command makes it wait infinitely and be aborted.
+            // Commands should avoid using interctive functions or use special flags.
+            //'posix_isatty (PHP)'  => function_exists('posix_isatty'),
             'pcntl_signal (console PHP)'    => function_exists('shell_exec') ? (int)\Helper::shellExec('php -r "echo (int)function_exists(\'pcntl_signal\');"') : false,
             'ps (shell)' => function_exists('shell_exec') ? \Helper::shellExec('ps') : false,
         ];
@@ -1962,7 +2177,7 @@ class Helper
         if (\Option::get('send_emails_problem')) {
             $flashes[] = [
                 'type'      => 'warning',
-                'text'      =>  __('There is a problem processing outgoing mail queue — an admin should check :%a_begin%System Status:%a_end% and :%a_begin_recommendations%Recommendations:%a_end%', ['%a_begin%' => '<a href="'.route('system').'#cron" target="_blank">', '%a_end%' => '</a>', /*'%a_begin_logs%' => '<a href="'.route('logs', ['name' => 'send_errors']).'#cron" target="_blank">',*/ '%a_begin_recommendations%' => '<a href="https://github.com/freescout-helpdesk/freescout/wiki/Background-Jobs" target="_blank">']),
+                'text'      =>  __('There is a problem processing outgoing mail queue — an admin should check :%a_begin%System Status:%a_end% and :%a_begin_recommendations%Recommendations:%a_end%', ['%a_begin%' => '<a href="'.route('system').'#cron" target="_blank">', '%a_end%' => '</a>', /*'%a_begin_logs%' => '<a href="'.route('logs', ['name' => 'send_errors']).'#cron" target="_blank">',*/ '%a_begin_recommendations%' => '<a href="'.config('app.freescout_repo').'/wiki/Background-Jobs" target="_blank">']),
                 'unescaped' => true,
             ];
         }
@@ -2036,7 +2251,7 @@ class Helper
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, config('app.curl_ssl_verifypeer'));        
     }
 
-    public static function setGuzzleDefaultOptions($params)
+    public static function setGuzzleDefaultOptions($params = [])
     {
         $default_params = [
             'timeout' => config('app.curl_timeout'),
@@ -2060,22 +2275,52 @@ class Helper
 
     public static function cspMetaTag()
     {
-        if (!config('app.csp_enabled')) {
-            return '';
-        }
+        // Disabled to improve security.
+        // if (!config('app.csp_enabled')) {
+        //     return '';
+        // }
 
         $nonce = \Helper::cspNonce();
 
-        return "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self' 'nonce-".$nonce."' "
-            .config('app.csp_script_src').' '.\Eventy::filter('csp.script_src', '')."\">";
-        //<meta property=\"csp-nonce\" id=\"csp-nonce\" content=\"".$nonce."\">";
+        $script_src = config('app.csp_script_src').' '.\Eventy::filter('csp.script_src', '');
+
+        $script_domains = '';
+        $scripts = explode(' ', $script_src);
+
+        foreach ($scripts as $url) {
+            $url = trim($url);
+            if (!preg_match("#^(http|//)#", $url)) {
+                $url = '//'.$url;
+            }
+            $parts = parse_url($url);
+            if (!empty($parts['host'])) {
+                $domain = preg_replace("#['\"; \r\n]#", '', $parts['host']);
+                $script_domains .= ' '.$domain;
+            }
+        }
+
+        //  frame-src https://recaptcha.net; connect-src https://recaptcha.net;
+
+        $csp = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self' ".self::sanitizeCsp($script_domains)."; img-src * 'self' data:; font-src * 'self' data:; style-src * 'self' 'unsafe-inline'; form-action 'self'; frame-src * 'self'; script-src 'self' 'nonce-".$nonce."' "
+            .self::sanitizeCsp($script_src).";"
+            .self::sanitizeCsp(config('app.csp_custom').\Eventy::filter('csp.custom', ''))."\">";
+
+        return $csp;
+    }
+
+    // Strip 'unsafe-inline' to improve security.
+    public static function sanitizeCsp($csp)
+    {
+        $csp = str_ireplace("'unsafe-inline'", '', $csp);
+        $csp = str_ireplace('unsafe-inline', '', $csp);
+        return $csp;
     }
 
     public static function cspNonceAttr()
     {
-        if (!config('app.csp_enabled')) {
-            return '';
-        }
+        // if (!config('app.csp_enabled')) {
+        //     return '';
+        // }
 
         return ' nonce="'.\Helper::cspNonce().'"';
     }
@@ -2132,5 +2377,10 @@ class Helper
         }
 
         return '';
+    }
+
+    public static function startsiWith($text, $string)
+    {
+        return (stripos($text, $string) === 0);
     }
 }

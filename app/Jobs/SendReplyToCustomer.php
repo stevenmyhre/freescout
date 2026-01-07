@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Mail\ReplyToCustomer;
+use App\Customer;
 use App\SendLog;
 use App\Thread;
 use App\Misc\SwiftGetSmtpQueueId;
@@ -12,7 +13,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Mail;
-use Webklex\IMAP\Client;
+//use Webklex\IMAP\Client;
 
 class SendReplyToCustomer implements ShouldQueue
 {
@@ -116,6 +117,17 @@ class SendReplyToCustomer implements ShouldQueue
             return;
         }
 
+        // After sending an email we are saving it into "IMAP Folder To Save Outgoing Replies".
+        // This process may stuck or make SendReplyToCustomer job die with
+        // "Allowed memory size of NNN bytes exhausted" error.
+        // https://github.com/freescout-helpdesk/freescout/issues/3632
+        if ($this->attempts() >= 1 && 
+            ($this->last_thread->send_status == SendLog::STATUS_ACCEPTED
+                || $this->last_thread->isSendStatusSuccess())
+        ) {
+            return;
+        }
+
         if (count($this->threads) == 1) {
             $new = true;
         }
@@ -153,6 +165,19 @@ class SendReplyToCustomer implements ShouldQueue
             }
             if ($references) {
                 $headers['References'] = $references;
+            }
+        }
+
+        // For Outlook threading.
+        // https://github.com/freescout-help-desk/freescout/issues/4922
+        if ($last_customer_thread) {
+            $outloook_thread_index = $last_customer_thread->getHeader('Thread-Index');
+            if (!empty($outloook_thread_index)) {
+                $headers['Thread-Index'] = $outloook_thread_index;
+                $outloook_thread_topic = $last_customer_thread->getHeader('Thread-Topic');
+                if ($outloook_thread_topic) {
+                    $headers['Thread-Topic'] = $outloook_thread_topic;
+                }
             }
         }
 
@@ -208,7 +233,12 @@ class SendReplyToCustomer implements ShouldQueue
         $this->message_id = $this->last_thread->getMessageId($mailbox);
         $headers['Message-ID'] = $this->message_id;
 
-        $this->customer_email = $this->conversation->customer_email;
+        // https://github.com/freescout-help-desk/freescout/issues/5121
+        if ($this->customer->id == $this->conversation->customer_id) {
+            $this->customer_email = $this->conversation->customer_email;
+        } else {
+            $this->customer_email = $this->last_thread->getToArray()[0] ?: $this->conversation->customer_email;
+        }
 
         // For phone conversations we may need to get customer email.
         // https://github.com/freescout-helpdesk/freescout/issues/3270
@@ -217,6 +247,12 @@ class SendReplyToCustomer implements ShouldQueue
             if (!$this->customer_email) {
                 return;
             }
+        }
+
+        // Try to get customer by email
+        if (!$this->customer) {
+            $this->customer = Customer::getByEmail($this->customer_email);
+            return;
         }
 
         $to_array = $mailbox->removeMailboxEmailsFromList($this->last_thread->getToArray());
@@ -273,6 +309,9 @@ class SendReplyToCustomer implements ShouldQueue
                 ->cc($cc_array)
                 ->bcc($bcc_array)
                 ->send($reply_mail);
+
+            $this->last_thread->send_status = SendLog::STATUS_ACCEPTED;
+            $this->last_thread->save();
 
             $smtp_queue_id = SwiftGetSmtpQueueId::$last_smtp_queue_id;
         } catch (\Exception $e) {
@@ -347,80 +386,93 @@ class SendReplyToCustomer implements ShouldQueue
         }
 
         $imap_sent_folder = $mailbox->imap_sent_folder;
-        if ($imap_sent_folder) {
+
+        if ($imap_sent_folder && \MailHelper::$smtp_mime_message) {
             try {
                 $client = \MailHelper::getMailboxClient($mailbox);
                 
                 $client->connect();
 
-                $envelope['from'] = $mailbox->getMailFrom(null, $this->conversation)['address'];
-                $envelope['to'] = $this->customer_email;
-                $envelope['subject'] = $subject;
-                $envelope['date'] = now()->toRfc2822String();
-                $envelope['message_id'] = $this->message_id;
+                // $mail_from = $mailbox->getMailFrom($this->last_thread->created_by_user ?? null, $this->conversation);
 
-                // CC.
-                if (count($cc_array)) {
-                    $envelope['cc'] = implode(',', $cc_array);
-                }
+                // if (!empty($mail_from['name'])) {
+                //     $envelope['from'] = '"'.$mail_from['name'].'" <'.$mail_from['address'].'>';
+                // } else {
+                //     $envelope['from'] = $mail_from['address'];
+                // }
+                // if (is_array($to) && !empty($to[0]) && !empty($to[0]['name']) && !empty($to[0]['email'])) {
+                //     $envelope['to'] = '"'.$to[0]['name'].'" <'.$to[0]['email'].'>';
+                // } else {
+                //     $envelope['to'] = $this->customer_email;
+                // }
+                // $envelope['subject'] = $subject;
+                // $envelope['date'] = now()->toRfc2822String();
+                // $envelope['message_id'] = $this->message_id;
 
-                // Get penultimate email Message-Id if reply
-                if (!$new && !empty($last_customer_thread) && $last_customer_thread->message_id) {
-                    $envelope['custom_headers'] = [
-                        'In-Reply-To: <'.$last_customer_thread->message_id.'>',
-                        'References: '.$references,
-                    ];
-                }
-                // Remove new lines to avoid "imap_mail_compose(): header injection attempt in subject".
-                foreach ($envelope as $i => $envelope_value) {
-                    $envelope[$i] = preg_replace("/[\r\n]/", '', $envelope_value);
-                }
+                // // CC.
+                // if (count($cc_array)) {
+                //     $envelope['cc'] = implode(',', $cc_array);
+                // }
 
-                $parts = [];
+                // // Get penultimate email Message-Id if reply
+                // if (!$new && !empty($last_customer_thread) && $last_customer_thread->message_id) {
+                //     $envelope['custom_headers'] = [
+                //         'In-Reply-To: <'.$last_customer_thread->message_id.'>',
+                //         'References: '.$references,
+                //     ];
+                // }
+                // // Remove new lines to avoid "imap_mail_compose(): header injection attempt in subject".
+                // foreach ($envelope as $i => $envelope_value) {
+                //     $envelope[$i] = preg_replace("/[\r\n]/", '', $envelope_value);
+                // }
 
-                // Multipart flag.
-                if ($this->last_thread->has_attachments) {
-                    $multipart = [];
-                    $multipart["type"] = TYPEMULTIPART;
-                    $multipart["subtype"] = "alternative";
-                    $parts[] = $multipart;
-                }
+                // $parts = [];
 
-                // Body.
-                $part_body['type'] = TYPETEXT;
-                $part_body['subtype'] = 'html';
-                $part_body['contents.data'] = $reply_mail->render();
-                $part_body['charset'] = 'utf-8';
+                // // Multipart flag.
+                // if ($this->last_thread->has_attachments) {
+                //     $multipart = [];
+                //     $multipart["type"] = \Webklex\PHPIMAP\IMAP::TYPEMULTIPART;
+                //     $multipart["subtype"] = "mixed";
+                //     // https://github.com/freescout-helpdesk/freescout/issues/3934
+                //     //$multipart["subtype"] = "alternative";
+                //     $parts[] = $multipart;
+                // }
 
-                $parts[] = $part_body;
+                // // Body.
+                // $part_body['type'] = \Webklex\PHPIMAP\IMAP::TYPETEXT;
+                // $part_body['subtype'] = 'html';
+                // $part_body['contents.data'] = $reply_mail->render();
+                // $part_body['charset'] = 'utf-8';
 
-                // Add attachments.
-                if ($this->last_thread->has_attachments) {
+                // $parts[] = $part_body;
 
-                    foreach ($this->last_thread->attachments as $attachment) {
+                // // Add attachments.
+                // if ($this->last_thread->has_attachments) {
 
-                        if ($attachment->embedded) {
-                            continue;
-                        }
+                //     foreach ($this->last_thread->attachments as $attachment) {
 
-                        if ($attachment->fileExists()) {
-                            $part = [];
-                            $part["type"] = 'APPLICATION';
-                            $part["encoding"] = ENCBASE64;
-                            $part["subtype"] = "octet-stream";
-                            $part["description"] = $attachment->file_name;
-                            $part['disposition.type'] = 'attachment';
-                            $part['disposition'] = array('filename' => $attachment->file_name);
-                            $part['type.parameters'] = array('name' => $attachment->file_name);
-                            $part["description"] = '';
-                            $part["contents.data"] = base64_encode($attachment->getFileContents());
+                //         if ($attachment->embedded) {
+                //             continue;
+                //         }
+
+                //         if ($attachment->fileExists()) {
+                //             $part = [];
+                //             $part["type"] = 'APPLICATION';
+                //             $part["encoding"] = \Webklex\PHPIMAP\IMAP::ENCBASE64;
+                //             $part["subtype"] = "octet-stream";
+                //             $part["description"] = $attachment->file_name;
+                //             $part['disposition.type'] = 'attachment';
+                //             $part['disposition'] = array('filename' => $attachment->file_name);
+                //             $part['type.parameters'] = array('name' => $attachment->file_name);
+                //             $part["description"] = '';
+                //             $part["contents.data"] = base64_encode($attachment->getFileContents());
                             
-                            $parts[] = $part;
-                        } else {
-                            \Log::error('[IMAP Folder To Save Outgoing Replies] Thread: '.$this->last_thread->id.'. Attachment file not find on disk: '.$attachment->getLocalFilePath());
-                        }
-                    }
-                }
+                //             $parts[] = $part;
+                //         } else {
+                //             \Log::error('[IMAP Folder To Save Outgoing Replies] Thread: '.$this->last_thread->id.'. Attachment file not find on disk: '.$attachment->getLocalFilePath());
+                //         }
+                //     }
+                // }
 
                 try {
                     // https://github.com/freescout-helpdesk/freescout/issues/3502
@@ -435,17 +487,19 @@ class SendReplyToCustomer implements ShouldQueue
                     // Get folder method does not work if sent folder has spaces.
                     if ($folder) {
                         try {
-                            $save_result = $this->saveEmailToFolder($client, $folder, $envelope, $parts, $bcc_array);
+                            //$save_result = $this->saveEmailToFolder($client, $folder, $envelope, $parts, $bcc_array);
+                            $save_result = $this->saveEmailToFolder($folder, \MailHelper::$smtp_mime_message);
+                            \MailHelper::$smtp_mime_message = '';
 
                             // Sometimes emails with attachments by some reason are not saved.
                             // https://github.com/freescout-helpdesk/freescout/issues/2749
+                            // if (!$save_result) {
+                            //     // Save without attachments.
+                            //     $save_result = $this->saveEmailToFolder($client, $folder, $envelope, [$part_body], $bcc_array);
                             if (!$save_result) {
-                                // Save without attachments.
-                                $save_result = $this->saveEmailToFolder($client, $folder, $envelope, [$part_body], $bcc_array);
-                                if (!$save_result) {
-                                    \Log::error($this->getImapSaveErrorPrefix($mailbox).'Could not save outgoing reply to the IMAP folder (check folder name and make sure IMAP folder does not have spaces - folders with spaces do not work): '.$imap_sent_folder);
-                                }
+                                \Log::error($this->getImapSaveErrorPrefix($mailbox).'Could not save outgoing reply to the IMAP folder (check folder name and make sure IMAP folder does not have spaces - folders with spaces do not work): '.$imap_sent_folder);
                             }
+                            //}
                         } catch (\Exception $e) {
                             // Just log error and continue.
                             \Helper::logException($e, $this->getImapSaveErrorPrefix($mailbox).'Could not save outgoing reply to the IMAP folder: ');
@@ -483,27 +537,32 @@ class SendReplyToCustomer implements ShouldQueue
     }
 
     // Save an email to IMAP folder.
-    public function saveEmailToFolder($client, $folder, $envelope, $parts, $bcc = [])
+    public function saveEmailToFolder($folder, $message_str)
     {
-        $envelope_str = imap_mail_compose($envelope, $parts);
-
-        // Add BCC.
-        // https://stackoverflow.com/questions/47353938/php-imap-append-with-bcc
-        if (!empty($bcc)) {
-            // There will be a "To:" parameter for sure.
-            $to_pos = strpos($envelope_str , "To:");
-            if ($to_pos !== false) {
-                $bcc_str = "Bcc: " . implode(',', $bcc) . "\r\n";
-                $envelope_str = substr_replace($envelope_str , $bcc_str, $to_pos, 0);
-            }
-        }
-
-        if (get_class($client) == 'Webklex\PHPIMAP\Client') {
-            return $folder->appendMessage($envelope_str, ['\Seen'], now()->format('d-M-Y H:i:s O'));
-        } else {
-            return $folder->appendMessage($envelope_str, '\Seen', now()->format('d-M-Y H:i:s O'));
-        }
+        return $folder->appendMessage($message_str, ['\Seen'], now()->format('d-M-Y H:i:s O'));
     }
+
+    // public function saveEmailToFolder($client, $folder, $envelope, $parts, $bcc = [])
+    // {
+    //     $envelope_str = imap_mail_compose($envelope, $parts);
+
+    //     // Add BCC.
+    //     // https://stackoverflow.com/questions/47353938/php-imap-append-with-bcc
+    //     if (!empty($bcc)) {
+    //         // There will be a "To:" parameter for sure.
+    //         $to_pos = strpos($envelope_str , "To:");
+    //         if ($to_pos !== false) {
+    //             $bcc_str = "Bcc: " . implode(',', $bcc) . "\r\n";
+    //             $envelope_str = substr_replace($envelope_str , $bcc_str, $to_pos, 0);
+    //         }
+    //     }
+
+    //     if (get_class($client) == 'Webklex\PHPIMAP\Client') {
+    //         return $folder->appendMessage($envelope_str, ['\Seen'], now()->format('d-M-Y H:i:s O'));
+    //     } else {
+    //         return $folder->appendMessage($envelope_str, '\Seen', now()->format('d-M-Y H:i:s O'));
+    //     }
+    // }
 
     /**
      * The job failed to process.

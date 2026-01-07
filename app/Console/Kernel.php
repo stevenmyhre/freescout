@@ -32,7 +32,10 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule)
     {
-        // Keep in mind that this function is also called on clearing cache.
+        // https://github.com/freescout-helpdesk/freescout/issues/3970
+        if (!$this->isScheduleRun() && !\Helper::isRoute('system.cron')) {
+            return;
+        }
 
         // Remove failed jobs
         $schedule->command('queue:flush')
@@ -100,23 +103,30 @@ class Kernel extends ConsoleKernel
             }
         }
 
+        $fetch_unseen = (int)config('app.fetch_unseen');
         $fetch_command_identifier = \Helper::getWorkerIdentifier('freescout:fetch-emails');
-        $fetch_command_name = 'freescout:fetch-emails --identifier='.$fetch_command_identifier;
+        $fetch_command_name = 'freescout:fetch-emails'
+            . ' --identifier='.$fetch_command_identifier
+            . ' --unseen='.$fetch_unseen;
 
         // Kill fetch commands running for too long.
         // In shedule:run this code is executed every time $schedule->command() in this function is executed.
-        if ($this->isScheduleRun() && function_exists('shell_exec')) {
+        if (function_exists('shell_exec')) {
             $fetch_command_pids = \Helper::getRunningProcesses($fetch_command_identifier);
 
             // The name of the command here must be exactly the same as below!
             // Otherwise long fetching will be killed and won't run longer than 1 mintue.
-            $mutex_name = $schedule->command($fetch_command_name)
-                ->skip(function () {
-                    return true;
-                })
-                ->mutexName();
+            // $schedule->command() creates a new mutex, so we need to store mutex name in cache.
+            // $mutex_name = $schedule->command($fetch_command_name)
+            //     ->everyMinute() - this also need to be set
+            //     ->skip(function () {
+            //         return true;
+            //     })
+            //     ->mutexName();
 
-            // If there is no cache mutext but there are running fetch commands 
+            $mutex_name = \Cache::get('fetch_mutex_name') ?? '';
+
+            // If there is no cache mutext but there are running fetch commands
             // it means the mutex had expired after self::FETCH_MAX_EXECUTION_TIME
             // and the existing command(s) is running longer than self::FETCH_MAX_EXECUTION_TIME.
             if (count($fetch_command_pids) > 0 && !\Cache::get($mutex_name)) {
@@ -131,6 +141,11 @@ class Kernel extends ConsoleKernel
                     // So here we are forcefully removing the mutex. Otherwise mutex will live for 24 hours.
                     if (\Cache::has($mutex_name)) {
                         \Cache::forget($mutex_name);
+
+                        // We could not remove the mutex from cache - something is wrong with permissions.
+                        if (\Cache::has($mutex_name)) {
+                            \Log::error('[schedule:run] Could not remove fetch mutex from cache (cache key: '.$mutex_name.'). Check file permissions.');
+                        }
                     }
                 }
             }
@@ -138,15 +153,21 @@ class Kernel extends ConsoleKernel
 
         // Fetch emails from mailboxes
         $fetch_command = $schedule->command($fetch_command_name)
-            // withoutOverlapping() option creates a mutex in the cache 
+            // withoutOverlapping() option creates a mutex in the cache
             // which by default expires in 24 hours.
             // So we are passing an 'expiresAt' parameter to withoutOverlapping() to
             // prevent fetching from not being executed when fetching command by some reason
-            // does not remove the mutex from the cache. 
+            // does not remove the mutex from the cache.
             ->withoutOverlapping($expiresAt = self::FETCH_MAX_EXECUTION_TIME /* minutes */)
             ->sendOutputTo(storage_path().'/logs/fetch-emails.log');
 
         switch (config('app.fetch_schedule')) {
+            case Mail::FETCH_SCHEDULE_EVERY_TWO_MINUTES:
+                $fetch_command->cron('*/2 * * * *');
+                break;
+            case Mail::FETCH_SCHEDULE_EVERY_THREE_MINUTES:
+                $fetch_command->cron('*/3 * * * *');
+                break;
             case Mail::FETCH_SCHEDULE_EVERY_FIVE_MINUTES:
                 $fetch_command->everyFiveMinutes();
                 break;
@@ -166,6 +187,7 @@ class Kernel extends ConsoleKernel
                 $fetch_command->everyMinute();
                 break;
         }
+        \Cache::put('fetch_mutex_name', $fetch_command->mutexName(), self::FETCH_MAX_EXECUTION_TIME);
 
         $schedule = \Eventy::filter('schedule', $schedule);
 
@@ -187,10 +209,10 @@ class Kernel extends ConsoleKernel
         // $schedule->command('queue:work') command below has withoutOverlapping() option,
         // which works via special mutex stored in the cache preventing several 'queue:work' to work at the same time.
         // So when the cache is cleared the mutex indicating that the 'queue:work' is running is removed,
-        // and the second 'queue:work' command is launched by cron. When `artisan schedule:run` is executed it sees 
+        // and the second 'queue:work' command is launched by cron. When `artisan schedule:run` is executed it sees
         // that there are two 'queue:work' processes running and kills them.
         // After one minute 'queue:work' is executed by cron via `artisan schedule:run` and works in the background.
-        if ($this->isScheduleRun() && function_exists('shell_exec')) {
+        if (function_exists('shell_exec')) {
             $running_commands = \Helper::getRunningProcesses();
 
             if (count($running_commands) > 1) {
@@ -202,7 +224,7 @@ class Kernel extends ConsoleKernel
                 sleep(1);
                 // Check processes again.
                 $worker_pids = \Helper::getRunningProcesses();
-                
+
                 if (count($worker_pids) > 1) {
                     // Current process also has to be killed, as otherwise it "stucks"
                     // $current_pid = getmypid();
@@ -226,8 +248,14 @@ class Kernel extends ConsoleKernel
                             return true;
                         })
                         ->mutexName();
-                    if (\Cache::get($mutex_name)) {
+
+                    if (\Cache::has($mutex_name)) {
                         \Cache::forget($mutex_name);
+
+                        // We could not remove the mutex from cache - something is wrong with permissions.
+                        if (\Cache::has($mutex_name)) {
+                            \Log::error('[schedule:run] Could not remove queue:work mutex from cache (cache key: '.$mutex_name.'). Check file permissions.');
+                        }
                     }
                 }
             }
@@ -240,12 +268,12 @@ class Kernel extends ConsoleKernel
     }
 
     /**
-     * This function is needed because every time $schedule->command() is executed 
+     * This function is needed because every time $schedule->command() is executed
      * the schedule() is executed also.
      */
     public function isScheduleRun()
     {
-        if (!\Helper::isConsole()) {
+        if (\Helper::isConsole()) {
             return true;
         } else {
             return !empty($_SERVER['argv']) && in_array('schedule:run', $_SERVER['argv']);

@@ -197,7 +197,7 @@ var EditorInsertVarButton = function (context) {
 
 	vars = fsApplyFilter('editor.vars', vars);
 
-	var contents = '<select class="form-control summernote-inservar" tabindex="-1">'+
+	var contents = '<select class="form-control summernote-inservar">'+
 		    '<option value="">'+Lang.get("messages.insert_var")+' ...</option>';
     for (var entity_name in vars) {
     	contents += '<optgroup label="'+Lang.get("messages."+entity_name)+'">';
@@ -708,6 +708,7 @@ function mailboxConnectionIncomingInit()
 	    $('#check-connection').click(function(event) {
 	    	var button = $(this);
 	    	button.button('loading');
+	    	$('#fetch_test_log').addClass('hidden');
 	    	fsAjax(
 				{
 					action: 'fetch_test',
@@ -719,6 +720,9 @@ function mailboxConnectionIncomingInit()
 						showFloatingAlert('success', Lang.get("messages.connection_established"), true);
 					} else {
 						showAjaxError(response, true);
+						if (typeof(response.log) != "undefined" && response.log) {
+							$('#fetch_test_log').removeClass('hidden').text(response.log);
+						}
 					}
 					button.button('reset');
 				},
@@ -743,7 +747,7 @@ function mailboxConnectionIncomingInit()
 					if (typeof(response.folders) != "undefined" && response.folders.length) {
 						for (i in response.folders) {
 							var imap_folder = response.folders[i];
-							if (select.find("option[value='"+imap_folder+"']").length) {
+							if (select.find("option[value='"+imap_folder.replaceAll("'", "\\'")+"']").length) {
 								continue;
 							}
 							options_html += '<option value="'+imap_folder+'" selected="selected">'+imap_folder+'</option>'
@@ -767,6 +771,13 @@ function mailboxConnectionIncomingInit()
 		});
 
 		$("#in_imap_folders").select2(fs_select2_config);
+
+		$('#form-fetching :input').on('change keyup', function(e) {
+			var btn = $('#check-connection');
+			if (!btn.attr('disabled')) {
+            	btn.attr('disabled', 'disabled');
+            }
+        });
 	});
 }
 
@@ -1420,6 +1431,13 @@ function initConversation()
 						// Does not work
 						e.preventDefault();
 						e.stopPropagation();
+
+						// If .conv-top-blocks contain invalid forms, exand it
+						$('#conv-top-blocks form').each(function() {
+							if (!$(this)[0].checkValidity()) {
+								$('#conv-top-blocks').collapse('show');
+							}
+						});
 					}
 				}
 			});
@@ -1430,10 +1448,11 @@ function initConversation()
 // Create new email conversation
 function switchToNewEmailConversation()
 {
+    $('.conv-switch-button').removeClass('active');
 	$('#email-conv-switch').addClass('active');
-	$('#phone-conv-switch').removeClass('active');
 	$('.email-conv-fields').show();
 	$('.phone-conv-fields').hide();
+    $('.custom-conv-fields').hide();
 	$('#field-to').show();
 	$('#name').addClass('parsley-exclude');
 	$('#to').removeClass('parsley-exclude');
@@ -1447,8 +1466,9 @@ function switchToNewEmailConversation()
 // Create new phone conversation
 function switchToNewPhoneConversation()
 {
-	$('#email-conv-switch').removeClass('active');
+    $('.conv-switch-button').removeClass('active');
 	$('#phone-conv-switch').addClass('active');
+    $('.custom-conv-fields').hide();
 	$('.email-conv-fields').hide();
 	$('.phone-conv-fields').show();
 
@@ -2024,7 +2044,7 @@ function editorSendFile(file, attach, is_conv, editor_id, container)
 
 function removeAttachment(attachment_id)
 {
-	$('.atachment-upload-'+attachment_id).remove();
+	$('.atachment-upload-'+$.escapeSelector(attachment_id)).remove();
 	//attachment.parent().parent().children(":input[value='"+attachment_id+"']");
 }
 
@@ -2060,6 +2080,10 @@ function initNewConversation(is_phone)
 		});
 		$('#phone-conv-switch').click(function() {
 			switchToNewPhoneConversation();
+		});
+		// Delete attachments
+		$('li.attachment-loaded .glyphicon-remove').click(function(e) {
+			removeAttachment($(this).attr('data-attachment-id'));
 		});
     });
 }
@@ -2363,6 +2387,12 @@ function getQueryParam(name, qs) {
 
     // Process arrays
     for (var param in params) {
+
+    	// Skip __proto__
+    	// https://github.com/freescout-helpdesk/freescout/security/advisories/GHSA-rx6j-4c33-9h3r
+    	if (param.match(/^__proto__\[/i)) {
+    		continue;
+    	}
     	
     	// Two dimentional
     	var m = param.match(/^([^\[]+)\[([^\[]+)\]$/i);
@@ -4378,7 +4408,7 @@ function showForwardForm(data, reply_block)
 	reply_block.children().find(":input[name='to']:first").addClass('hidden');
 	reply_block.children().find("#cc").val('').trigger('change');
 	reply_block.children().find("#bcc").val('').trigger('change');
-	reply_block.children().find(":input[name='to_email']:first").removeClass('hidden').removeClass('parsley-exclude').next('.select2:first').show();
+	reply_block.children().find(":input[name='to_email[]']:first").removeClass('hidden').removeClass('parsley-exclude').next('.select2:first').show();
 	reply_block.addClass('inactive');
 	reply_block.addClass('conv-forward-block');
 	$(".conv-actions .conv-reply:first").addClass('inactive');
@@ -4530,7 +4560,9 @@ function editThread(button)
 				// Hide all elements in thread container.
 				thread_container.children().hide();
 				thread_container.prepend(response.html);
-				summernoteInit(thread_container.find('.thread-editor:first'));
+				summernoteInit(thread_container.find('.thread-editor:first'), {
+					toolbar: fs_conv_editor_toolbar
+				});
 
 				thread_container.children().find('.thread-editor-cancel:first').click(function(e) {
 					cancelThreadEdit(e.target);
@@ -4599,7 +4631,8 @@ function saveThreadEdit(trigger)
 			button.button('reset');
 			if (typeof(response.status) != "undefined" && response.status == 'success') {
 				// Show new body
-				thread_container.find('.thread-body:first').html(response.body);
+				thread_container.find('.thread-body .thread-content:first').html(response.body);
+				thread_container.find('.thread-body .thread-meta:first').remove();
 				cancelThreadEdit(trigger, thread_container);
 			} else {
 				showAjaxError(response);
@@ -4805,95 +4838,108 @@ function converstationBulkActionsInit()
 			}
 		});
 
-		// Change conversation assignee
-		$(".conv-user li > a", bulk_buttons).click(function(e) {
-			if ($(this).hasClass('disabled')) {
-				return;
-			}
-
-			var user_id = $(this).data('user_id');
-
-			var conv_ids = getSelectedConversations(checkboxes);
-
-			fsAjax(
-				{
-					action: 'bulk_conversation_change_user',
-					conversation_id: conv_ids,
-					user_id: user_id
-				},
-				laroute.route('conversations.ajax'),
-				function(response) {
-					if (isAjaxSuccess(response)) {
-						location.reload();
-					} else {
-						showAjaxError(response);
-					}
-				}, true
-			);
-			e.preventDefault();
-		});
-
-		// Change conversation status
-		$(".conv-status li > a", bulk_buttons).click(function(e) {
-			var status = $(this).data('status');
-
-			var conv_ids = getSelectedConversations(checkboxes);
-
-			fsAjax(
-				{
-					action: 'bulk_conversation_change_status',
-					conversation_id: conv_ids,
-					status: status
-				},
-				laroute.route('conversations.ajax'),
-				function(response) {
-					if (isAjaxSuccess(response)) {
-						location.reload();
-					} else {
-						showAjaxError(response);
-					}
-				}, true
-			);
-			e.preventDefault();
-		});
-
-		// Delete conversation
-		$(".conv-delete", bulk_buttons).click(function(e) {
-
-			showModalDialog('#conversations-bulk-actions-delete-modal', {
-				on_show: function(modal) {
-					modal.children().find('.delete-conversation-ok:first').click(function(e) {
-						modal.modal('hide');
-
-						var conv_ids = getSelectedConversations(checkboxes);
-
-						fsAjax(
-							{
-								action: 'bulk_delete_conversation',
-								conversation_id: conv_ids,
-							},
-							laroute.route('conversations.ajax'),
-							function(response) {
-								if (isAjaxSuccess(response)) {
-									location.reload();
-								} else {
-									showAjaxError(response);
-								}
-							}, true
-						);
-						e.preventDefault();
-					});
+		if (!bulk_buttons.attr('data-initialized')) {
+			// Change conversation assignee
+			$(".conv-user li > a", bulk_buttons).click(function(e) {
+				if ($(this).hasClass('disabled')) {
+					return;
 				}
-			});
-			e.preventDefault();
-		});
 
-		$('.conv-checkbox-clear', bulk_buttons).click(function(e) {
-			$(checkboxes).trigger('change');
-			$(checkboxes).prop('checked', false);
-			$(checkboxes).trigger('change');
-			$('table.table-conversations tr').removeClass('selected');
-		});
+				var user_id = $(this).data('user_id');
+
+				// We should pass empty "checkboxes" parameter
+				// to avoid selected conversations list being empty
+				// after sorting conversations.
+				var conv_ids = getSelectedConversations();
+
+				fsAjax(
+					{
+						action: 'bulk_conversation_change_user',
+						conversation_id: conv_ids,
+						user_id: user_id
+					},
+					laroute.route('conversations.ajax'),
+					function(response) {
+						if (isAjaxSuccess(response)) {
+							location.reload();
+						} else {
+							showAjaxError(response);
+						}
+					}, true
+				);
+				e.preventDefault();
+			});
+
+			// Change conversation status
+			$(".conv-status li > a", bulk_buttons).click(function(e) {
+				var status = $(this).data('status');
+
+				// We should pass empty "checkboxes" parameter
+				// to avoid selected conversations list being empty
+				// after sorting conversations.
+				var conv_ids = getSelectedConversations();
+
+				fsAjax(
+					{
+						action: 'bulk_conversation_change_status',
+						conversation_id: conv_ids,
+						status: status
+					},
+					laroute.route('conversations.ajax'),
+					function(response) {
+						if (isAjaxSuccess(response)) {
+							location.reload();
+						} else {
+							showAjaxError(response);
+						}
+					}, true
+				);
+				e.preventDefault();
+			});
+
+			// Delete conversation
+			$(".conv-delete", bulk_buttons).click(function(e) {
+
+				showModalDialog('#conversations-bulk-actions-delete-modal', {
+					on_show: function(modal) {
+						modal.children().find('.delete-conversation-ok:first').click(function(e) {
+							modal.modal('hide');
+
+							// We should pass empty "checkboxes" parameter
+							// to avoid selected conversations list being empty
+							// after sorting conversations.
+							var conv_ids = getSelectedConversations();
+
+							fsAjax(
+								{
+									action: 'bulk_delete_conversation',
+									conversation_id: conv_ids,
+								},
+								laroute.route('conversations.ajax'),
+								function(response) {
+									if (isAjaxSuccess(response)) {
+										location.reload();
+									} else {
+										showAjaxError(response);
+									}
+								}, true
+							);
+							e.preventDefault();
+						});
+					}
+				});
+				e.preventDefault();
+			});
+
+			$('.conv-checkbox-clear', bulk_buttons).click(function(e) {
+				$(checkboxes).trigger('change');
+				$(checkboxes).prop('checked', false);
+				$(checkboxes).trigger('change');
+				$('table.table-conversations tr').removeClass('selected');
+			});
+
+			bulk_buttons.attr('data-initialized', '1');
+		}
 
 		$('.toggle-all:checkbox').on('click', function () {
 			$('.conv-checkbox:checkbox').prop('checked', this.checked).trigger('change');
@@ -4902,7 +4948,7 @@ function converstationBulkActionsInit()
 		$('.conv-cb label').on( 'click', function(e){
 
 		    var all_checkboxes = $('input.conv-checkbox');
-			var this_input = $( this ).parent('td').find('input.conv-checkbox' )[0];
+			var this_input = $(this).parent('td').find('input.conv-checkbox')[0];
 
 			// Remove the selection of text that happens.
 			document.getSelection().removeAllRanges();
@@ -4913,18 +4959,38 @@ function converstationBulkActionsInit()
 		    }
 
 		    if (e.shiftKey) {
-		        var start = all_checkboxes.index( this_input );
+		        var start = all_checkboxes.index(this_input);
 		        var end = all_checkboxes.index(fs_checkbox_shift_last_checked);
 
-		        all_checkboxes.slice(Math.min(start,end), Math.max(start,end)+ 1).prop('checked', fs_checkbox_shift_last_checked.checked);
+		        all_checkboxes.slice(Math.min(start,end), Math.max(start,end)+1).prop('checked', fs_checkbox_shift_last_checked.checked);
 
 				// When removing the selected text using getSelection(), the last click gets nullified. Let's re-do it.
-				$( this_input ).trigger('click');
+				if (getBrowser() != 'Firefox') {
+					$(this_input).trigger('click');
+				}
 		    }
 
 		    fs_checkbox_shift_last_checked = this_input;
 		});
 	});
+}
+
+function getBrowser(){
+    let browser = "";
+    let c = navigator.userAgent.search("Chrome");
+    let f = navigator.userAgent.search("Firefox");
+    let m8 = navigator.userAgent.search("MSIE 8.0");
+    let m9 = navigator.userAgent.search("MSIE 9.0");
+    if (c > -1) {
+        browser = "Chrome";
+    } else if (f > -1) {
+        browser = "Firefox";
+    } else if (m9 > -1) {
+        browser ="MSIE 9.0";
+    } else if (m8 > -1) {
+        browser ="MSIE 8.0";
+    }
+    return browser;
 }
 
 function switchToNote()
@@ -5408,35 +5474,53 @@ function inApp(topic, token)
 	});
 }
 
-function setCookie(name, value, props)
-{
-    props = props || {path:"/"};
+function setCookie(name, value, props) {
+    props = props || {};
+    
+    // Default path if not provided
+    if (!("path" in props)) {
+        props.path = "/";
+    }
+    
+    // Default SameSite None (if desired)
+    if (!("samesite" in props)) {
+        props.samesite = "None";
+    }
+    
+    // If SameSite=None, Secure flag is required by modern browsers
+    if (props.samesite && props.samesite.toLowerCase() === "none" && !("secure" in props)) {
+        props.secure = true;
+    }
 
     if (!props.expires) {
-    	// Max expiration date
-		var exp_date = new Date();
-	    exp_date.setSeconds(2147483647);
-    	props.expires = exp_date;
+        var exp_date = new Date();
+        // Add 68 years explicitly (approx 2147483647 seconds)
+        exp_date.setTime(exp_date.getTime() + 2147483647 * 1000);
+        props.expires = exp_date;
     }
 
     var exp = props.expires;
-    if (typeof exp == "number" && exp) {
+
+    if (typeof exp === "number") {
         var d = new Date();
-        d.setTime(d.getTime() + exp*1000);
+        d.setTime(d.getTime() + exp * 1000);
         exp = props.expires = d;
     }
-    if (exp && exp.toUTCString) { 
-    	props.expires = exp.toUTCString();
+
+    if (exp && typeof exp.toUTCString === "function") {
+        props.expires = exp.toUTCString();
     }
 
     value = encodeURIComponent(value);
-    var updatedCookie = name + "=" + value
+
+    var updatedCookie = name + "=" + value;
+
     for (var propName in props) {
-        updatedCookie += "; " + propName;
+        updatedCookie += "; " + propName.toLowerCase();
         var propValue = props[propName];
         if (propValue !== true) {
-        	updatedCookie += "=" + propValue;
-       	}
+            updatedCookie += "=" + propValue;
+        }
     }
 
     document.cookie = updatedCookie;
@@ -5676,4 +5760,36 @@ function isChatMode()
 function reloadPage()
 {
 	window.location.href = '';
+}
+
+function getLocale()
+{
+	return $('html:first').attr('lang');
+}
+
+function initMergeCustomers()
+{
+	$(document).ready(function(){
+		var input = $('#merge_customer2_id');
+		initCustomerSelector(input, {
+			placeholder: input.attr('placeholder'),
+			multiple: true,
+			maximumSelectionLength: 1,
+			ajax: {
+				url: laroute.route('customers.ajax_search'),
+				dataType: 'json',
+				delay: 250,
+				cache: true,
+				data: function (params) {
+					return {
+						q: params.term,
+						exclude_id: getGlobalAttr('customer_id'),
+						search_by: 'all',
+						use_id: true,
+						page: params.page
+					};
+				}
+			}
+		});
+	});
 }

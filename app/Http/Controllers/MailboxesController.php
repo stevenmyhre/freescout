@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Conversation;
 use App\Folder;
 use App\Mailbox;
+use App\MailboxUser;
 use App\Thread;
 use App\User;
 use Illuminate\Http\Request;
@@ -85,8 +86,14 @@ class MailboxesController extends Controller
                         ->withInput();
         }
 
+        $request_data = [
+            'email'   => $request->email,
+            'name'    => trim(strip_tags($request->name)),
+            'ratings' => $request->ratings ?? 1,
+        ];
+
         $mailbox = new Mailbox();
-        $mailbox->fill($request->all());
+        $mailbox->fill($request_data);
 
         $mailbox->save();
 
@@ -105,6 +112,8 @@ class MailboxesController extends Controller
     {
         $mailbox = Mailbox::findOrFail($id);
         $user = auth()->user();
+
+        // Redirect to the accessible page.
         if (!$user->can('updateSettings', $mailbox) && !$user->can('updateEmailSignature', $mailbox)) {
             $accessible_route = '';
 
@@ -159,10 +168,15 @@ class MailboxesController extends Controller
         $mailbox = Mailbox::findOrFail($id);
 
         $user = auth()->user();
+
+        $can_update_settings = $user->can('updateSettings', $mailbox);
+        $can_update_signature = $user->can('updateEmailSignature', $mailbox);
         
-        if (!$user->can('updateSettings', $mailbox) && !$user->can('updateEmailSignature', $mailbox)) {
+        if (!$can_update_settings && !$can_update_signature) {
             \Helper::denyAccess();
         }
+
+        $allowed_fields = [];
 
         if ($user->can('updateSettings', $mailbox)) {
 
@@ -182,7 +196,7 @@ class MailboxesController extends Controller
             $validator = Validator::make($request->all(), [
                 'name'             => 'required|string|max:40',
                 'email'            => 'required|string|email|max:128|unique:mailboxes,email,'.$id,
-                'aliases'          => 'nullable|string|max:255',
+                'aliases'          => 'nullable|string',
                 'from_name'        => 'required|integer',
                 'from_name_custom' => 'nullable|string|max:128',
                 'ticket_status'    => 'required|integer',
@@ -203,9 +217,22 @@ class MailboxesController extends Controller
                             ->withErrors($validator)
                             ->withInput();
             }
+
+            $allowed_fields = [
+                'name',
+                'email',
+                'aliases',
+                'aliases_reply',
+                'auto_bcc',
+                'from_name',
+                'from_name_custom',
+                'ticket_status',
+                'ticket_assignee',
+                'before_reply',
+            ];
         }
 
-        if ($user->can('updateEmailSignature', $mailbox)) {
+        if ($can_update_signature) {
             $validator = Validator::make($request->all(), [
                 'signature'        => 'nullable|string',
             ]);
@@ -215,11 +242,29 @@ class MailboxesController extends Controller
                     ->withErrors($validator)
                     ->withInput();
             }
+            $allowed_fields[] = 'signature';
         }
 
         \Eventy::action('mailbox.settings_before_save', $mailbox, $request);
 
-        $mailbox->fill($request->all());
+        // Leave only allowed fields.
+        $fields = $request->all();
+        foreach ($fields as $field_name => $value) {
+            if (!in_array($field_name, $allowed_fields)) {
+                unset($fields[$field_name]);
+            }
+        }
+
+        $mailbox->fill($fields);
+
+        // Chat: Start a new conversation when receiving a reply to the closed / deleted Chat conversation.
+        if (!empty($request->chat_start_new)) {
+            $mailbox->setMetaParam('chat_start_new', true);
+        } else {
+            $mailbox->removeMetaParam('chat_start_new');
+        }
+
+        $mailbox->signature = \Helper::stripDangerousTags($mailbox->signature);
 
         $mailbox->save();
 
@@ -268,8 +313,24 @@ class MailboxesController extends Controller
         $this->authorize('updatePermissions', $mailbox);
 
         $user = auth()->user();
+        $user_ids = \Eventy::filter('mailbox.permission_users', $request->users ?? [], $id);
 
-        $mailbox->users()->sync(\Eventy::filter('mailbox.permission_users', $request->users, $id) ?: []);
+        // Get pivot data from mailbox_user to pass to sync() not to loose values.
+        // https://github.com/freescout-help-desk/freescout/issues/4339
+        $users_with_settings = [];
+        $mailbox_users = MailboxUser::where('mailbox_id', $id)
+            //->whereIn('user_id', $user_ids)
+            ->get()
+            ->keyBy('user_id')
+            ->toArray();
+        foreach ($user_ids as $user_id) {
+            $users_with_settings[$user_id] = $mailbox_users[$user_id] ?? [];
+        }
+
+        // Settings for admins are being reset here.
+        // So we restore them below.
+        $mailbox->users()->sync($users_with_settings);
+
         $mailbox->syncPersonalFolders($request->users);
 
         // Save admins settings.
@@ -280,6 +341,15 @@ class MailboxesController extends Controller
                 // Admin may not be connected to the mailbox yet
                 $admin->mailboxes()->attach($id);
                 $mailbox_user = $admin->mailboxesWithSettings()->where('mailbox_id', $id)->first();
+            }
+            // Restore settings for admins.
+            if (!empty($mailbox_users[$admin->id])) {
+                $admin_settings = $mailbox_users[$admin->id];
+                foreach (MailboxUser::$pivot_settings as $pivot_parameter) {
+                    if (isset($admin_settings[$pivot_parameter])) {
+                        $mailbox_user->settings->$pivot_parameter = $admin_settings[$pivot_parameter];
+                    }
+                }
             }
             $mailbox_user->settings->hide = (isset($request->managers[$admin->id]['hide']) ? (int)$request->managers[$admin->id]['hide'] : false);
             $mailbox_user->settings->save();
@@ -334,7 +404,7 @@ class MailboxesController extends Controller
             $validator = Validator::make($request->all(), [
                 'out_server'          => 'required|string|max:255',
                 'out_port'            => 'required|integer',
-                'out_username'        => 'nullable|string|max:100',
+                'out_username'        => 'nullable|string|max:255',
                 'out_password'        => 'nullable|string|max:255',
                 'out_encryption'      => 'required|integer',
             ]);
@@ -501,7 +571,7 @@ class MailboxesController extends Controller
             if (Route::currentRouteName() != 'mailboxes.connection.incoming' && !$mailbox->isInActive()) {
                 $flashes[] = [
                     'type'      => 'warning',
-                    'text'      => __('Receiving emails need to be configured for the mailbox in order to fetch emails from your support email address').' ('.__('Connection Settings').' » <a href="'.route('mailboxes.connection.incoming', ['id' => $mailbox->id]).'">'.__('Receiving Emails').'</a>)',
+                    'text'      => __('Receiving emails need to be configured for the mailbox in order to fetch emails from your support email address').' ('.__('Connection Settings').' » <a href="'.route('mailboxes.connection.incoming', ['id' => $mailbox->id]).'">'.__('Fetching Emails').'</a>)',
                     'unescaped' => true,
                 ];
             }
@@ -560,7 +630,14 @@ class MailboxesController extends Controller
             }
         }
 
-        $mailbox->fill($request->all());
+        $data = [
+            'auto_reply_enabled' => $request->auto_reply_enabled,
+            'auto_reply_subject' => $request->auto_reply_subject,
+            'auto_reply_message' => $request->auto_reply_message,
+        ];
+
+        $mailbox->fill($data);
+        $mailbox->auto_reply_message = \Helper::stripDangerousTags($mailbox->auto_reply_message);
 
         $mailbox->save();
 
@@ -675,13 +752,14 @@ class MailboxesController extends Controller
                 if (!$response['msg'] && !$tested) {
                     $test_result = false;
 
-                    try {
-                        $test_result = \MailHelper::fetchTest($mailbox);
-                    } catch (\Exception $e) {
-                        $response['msg'] = $e->getMessage();
-                    }
+                    $test_result = \MailHelper::fetchTest($mailbox);
 
-                    if (!$test_result && !$response['msg']) {
+                    $response['log'] = $test_result['log'] ?? '';
+
+                    if ($test_result['result'] != 'success' && $test_result['msg']) {
+                        $response['msg'] = $test_result['msg'];
+                    }
+                    if ($test_result['result'] != 'success' && !$response['msg']) {
                         $response['msg'] = __('Error occurred connecting to the server');
                     }
                 }
@@ -715,9 +793,29 @@ class MailboxesController extends Controller
 
                         if (count($imap_folders)) {
                             $response = $this->interateFolders($response, $imap_folders);
+                            $response['folders'] = array_values(array_unique($response['folders']));
                         }
 
                         if (count($response['folders'])) {
+
+                            // https://github.com/freescout-helpdesk/freescout/issues/3933
+                            // Exclude duplicate INBOX.Name and Name folders.
+                            // $folder_excluded = false;
+                            // foreach ($response['folders'] as $i => $folder_name) {
+                            //     if (\Str::startsWith($folder_name, 'INBOX.')) {
+                            //         foreach ($response['folders'] as $folder_name2) {
+                            //             if ($folder_name != $folder_name2 && $folder_name == 'INBOX.'.$folder_name2) {
+                            //                 unset($response['folders'][$i]);
+                            //                 $folder_excluded = true;
+                            //                 continue 2;
+                            //             }
+                            //         }
+                            //     }
+                            // }
+                            // if ($folder_excluded) {
+                            //     $response['folders'] = array_values($response['folders']);
+                            // }
+
                             $response['msg_success'] = __('IMAP folders retrieved: '.implode(', ', $response['folders']));
                         } else {
                             $response['msg_success'] = __('Connected, but no IMAP folders found');
@@ -747,20 +845,7 @@ class MailboxesController extends Controller
 
                 if (!$response['msg']) {
 
-                    // Remove threads and conversations.
-                    $conversation_ids = $mailbox->conversations()->pluck('id')->toArray();
-                    
-                    for ($i=0; $i < ceil(count($conversation_ids) / \Helper::IN_LIMIT); $i++) { 
-                        $slice_ids = array_slice($conversation_ids, $i*\Helper::IN_LIMIT, \Helper::IN_LIMIT);
-                        Thread::whereIn('conversation_id', $slice_ids)->delete();
-                    }
-
-                    $mailbox->conversations()->delete();
-                    $mailbox->users()->sync([]);
-                    $mailbox->folders()->delete();
-                    // Maybe remove notifications on events in this mailbox?
-
-                    $mailbox->delete();
+                    $mailbox->deleteMailbox();
 
                     \Session::flash('flash_success_floating', __('Mailbox deleted'));
 
@@ -770,17 +855,23 @@ class MailboxesController extends Controller
 
             // Mute notifications
             case 'mute':
+                if (!$user) {
+                    \Helper::denyAccess();
+                }
+
                 $mailbox = Mailbox::find($request->mailbox_id);
 
                 if (!$mailbox) {
                     $response['msg'] = __('Mailbox not found');
+                } elseif (!$user->can('view', $mailbox)) {
+                    $response['msg'] = __('Not enough permissions');
                 }
 
                 if (!$response['msg']) {
 
                     $mailbox_user = $user->mailboxesWithSettings()->where('mailbox_id', $mailbox->id)->first();
-                    if (!$mailbox_user) {
-                        // User may not be connected to the mailbox yet
+                    if (!$mailbox_user && $user->isAdmin()) {
+                        // Admin may not be connected to the mailbox yet
                         $user->mailboxes()->attach($mailbox->id);
                         $mailbox_user = $user->mailboxesWithSettings()->where('mailbox_id', $mailbox->id)->first();
                     }
@@ -804,23 +895,22 @@ class MailboxesController extends Controller
     }
 
     // Recursively interate over folders.
-    public function interateFolders($response, $imap_folders) {
+    public function interateFolders($response, $imap_folders, $subfolder = false) {
         foreach ($imap_folders as $imap_folder) {
-            if (!empty($imap_folder->name)) {
+            if (!empty($imap_folder->name) && !$subfolder) {
                 $response['folders'][] = $imap_folder->name;
             }
 
             // Check for children and recurse.
             if (!empty($imap_folder->children)) {
-                $response = $this->interateFolders($response, $imap_folder->children);
+                $response = $this->interateFolders($response, $imap_folder->children, true);
             }
 
             // Old library.
             if (!empty($imap_folder->fullName)) {
                 $response['folders'][] = $imap_folder->fullName;
-            }
-            // New library.
-            if (!empty($imap_folder->full_name)) {
+            } elseif (!empty($imap_folder->full_name)) {
+                // New library.
                 $response['folders'][] = $imap_folder->full_name;
             }
         }
@@ -832,6 +922,7 @@ class MailboxesController extends Controller
     {
         $mailbox_id = $request->id ?? '';
         $provider = $request->provider ?? '';
+        $in_out = $request->in_out ?? 'in';
         
         $state_data = [];
         if (!empty($request->state)) {
@@ -841,6 +932,9 @@ class MailboxesController extends Controller
             }
             if (!empty($state_data['provider'])) {
                 $provider = $state_data['provider'];
+            }
+            if (!empty($state_data['in_out'])) {
+                $in_out = $state_data['in_out'];
             }
         }
 
@@ -859,10 +953,17 @@ class MailboxesController extends Controller
         if (empty($mailbox)) {
             return __('Mailbox not found').': '.$mailbox_id;
         }
-        if (empty($mailbox->in_username)) {
+        if ($in_out == 'in') {
+            $username = $mailbox->getInOauthClientId();
+            $password = $mailbox->in_password;
+        } else {
+            $username = $mailbox->getOutOauthClientId();
+            $password = $mailbox->out_password;
+        }
+        if (empty($username)) {
             return 'Enter oAuth Client ID as Username and save mailbox settings';
         }
-        if (empty($mailbox->in_password)) {
+        if (empty($password)) {
             return 'Enter oAuth Client Secret as Password and save mailbox settings';
         }
 
@@ -872,14 +973,16 @@ class MailboxesController extends Controller
         }
 
         if (empty($request->code)) {
+            // Start.
             $state = [
                 'provider' => $provider,
                 'mailbox_id' => $mailbox_id,
-                'state' => crc32($mailbox->in_username.$mailbox->in_password),
+                'in_out' => $in_out,
+                'state' => crc32($username.$password),
             ];
             $url = \MailHelper::oauthGetAuthorizationUrl(\MailHelper::OAUTH_PROVIDER_MICROSOFT, [
                 'state' => json_encode($state),
-                'client_id' => $mailbox->in_username,
+                'client_id' => $username,
             ]);
             if ($url) {
                 \Session::put('mailbox_oauth_'.$provider.'_'.$mailbox_id, $state);
@@ -900,21 +1003,40 @@ class MailboxesController extends Controller
             return 'Invalid oAuth state';
 
         } else {
-
+            // state is set.
             // Try to get an access token (using the authorization code grant)
             $token_data = \MailHelper::oauthGetAccessToken(\MailHelper::OAUTH_PROVIDER_MICROSOFT, [
-                'client_id' => $mailbox->in_username,
-                'client_secret' => $mailbox->in_password,
+                'client_id' => $username,
+                'client_secret' => $password,
                 'code' => $request->code,
             ]);
 
             if (!empty($token_data['a_token'])) {
+                // Set username and password for the oppozite in_out.
+                if ($in_out == 'in') {
+                    if (empty($mailbox->out_server) 
+                        || (trim($mailbox->out_server) == \MailHelper::OAUTH_MICROSOFT_SMTP 
+                            && (!$mailbox->out_username || $mailbox->out_username == $username))
+                    ) {
+                        $mailbox->out_username = $username;
+                        $mailbox->out_password = $password;
+                    }
+                    //$mailbox->out_method = Mailbox::OUT_METHOD_SMTP;
+                } else {
+                    $mailbox->in_username = $username;
+                    $mailbox->in_password = $password;
+                }
                 $mailbox->setMetaParam('oauth', $token_data, true);
             } elseif (!empty($token_data['error'])) {
                 return __('Error occurred').': '.htmlspecialchars($token_data['error']);
             }
 
-            return redirect()->route('mailboxes.connection.incoming', ['id' => $mailbox_id]);
+            if ($in_out == 'in') {
+                $route = 'mailboxes.connection.incoming';
+            } else {
+                $route = 'mailboxes.connection';
+            }
+            return redirect()->route($route, ['id' => $mailbox_id]);
         }
     }
 
@@ -922,12 +1044,20 @@ class MailboxesController extends Controller
     {
         $mailbox_id = $request->id ?? '';
         $provider = $request->provider ?? '';
+        $in_out = $request->in_out ?? 'in';
 
         $mailbox = Mailbox::findOrFail($mailbox_id);
         $this->authorize('admin', $mailbox);
         
         // oAuth Disconnect.
         $mailbox->removeMetaParam('oauth', true);
-        return \MailHelper::oauthDisconnect($provider, route('mailboxes.connection.incoming', ['id' => $mailbox_id]));
+
+        if ($in_out == 'in') {
+            $route = 'mailboxes.connection.incoming';
+        } else {
+            $route = 'mailboxes.connection';
+        }
+
+        return \MailHelper::oauthDisconnect($provider, route($route, ['id' => $mailbox_id]));
     }
 }

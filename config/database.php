@@ -53,8 +53,9 @@ return [
             'strict'      => false,
             'engine'      => null,
             'options'     => extension_loaded('pdo_mysql') ? array_filter([
-                PDO::MYSQL_ATTR_SSL_CA => env('DB_MYSQL_ATTR_SSL_CA'),
-                PDO::MYSQL_ATTR_SSL_CERT => env('DB_MYSQL_ATTR_SSL_CERT'),
+                (defined('Pdo\Mysql::ATTR_SSL_CA') ? Pdo\Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('DB_MYSQL_ATTR_SSL_CA'),
+                (defined('Pdo\Mysql::ATTR_SSL_CERT') ? Pdo\Mysql::ATTR_SSL_CERT : PDO::MYSQL_ATTR_SSL_CERT) => env('DB_MYSQL_ATTR_SSL_CERT'),
+                PDO::ATTR_PERSISTENT => env('DB_ATTR_PERSISTENT'),
             ]) : [],
         ],
 
@@ -98,6 +99,10 @@ return [
             'prefix'   => env('DB_TABLE_PREFIX', ''),
             'schema'   => 'public',
             'sslmode'  => env('DB_PGSQL_SSLMODE', 'prefer'),
+            'options'  => extension_loaded('pdo_pgsql') ? array_filter([
+                PDO::PGSQL_ATTR_DISABLE_PREPARES => env('DB_PGSQL_ATTR_DISABLE_PREPARES'),
+                PDO::ATTR_PERSISTENT => env('DB_ATTR_PERSISTENT'),
+            ]) : [],
         ],
 
         'sqlsrv' => [
@@ -139,7 +144,7 @@ return [
 
     'redis' => [
 
-        'client' => 'predis',
+        'client' => env('REDIS_CLIENT', 'predis'),
 
         'default' => [
             'host'     => env('REDIS_HOST', '127.0.0.1'),

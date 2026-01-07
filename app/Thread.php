@@ -2,6 +2,7 @@
 
 namespace App;
 
+use App\Mailbox;
 use App\SendLog;
 use App\Events\ConversationStatusChanged;
 use App\Events\ConversationUserChanged;
@@ -315,6 +316,23 @@ class Thread extends Model
         // Cut out "collapse" class as it hides elements.
         $body = preg_replace("/(<[^<>\r\n]+class=([\"'][^\"']* |[\"']))(collapse|hidden)([\"' ])/", '$1$4', $body) ?: $body;
 
+        // Take care of MSO-comments.
+        // https://github.com/freescout-help-desk/freescout/issues/5068
+        // Step 1: Completely remove the MSO-specific blocks.
+        // The 's' flag allows '.' to match newlines, and 'i' makes it case-insensitive.
+        $body = preg_replace('/<!--\[if mso\]>.*?<!\[endif\]-->/is', '', $body);
+        // Step 2: Unwrap the standard HTML from the "not mso" comments.
+        // This reveals the standard <a> tag for the purifier.
+        $body = preg_replace('/<!--\[if !mso\]><!--\s*-->(.*?)<!--\s*<!\[endif\]-->/is', '$1', $body);
+
+        // Remove only the <!--[if !mso]><!--> and <!--<![endif]--> around the elements.
+        // https://github.com/freescout-helpdesk/freescout/pull/3865#issuecomment-1990758149
+        $body = preg_replace('/<!\-\-\[if [^>]+\]><!\-\->(.*?)<![ ]+\-\-<!\[endif\]\-\->/s', '$1', $body);
+
+        // https://github.com/freescout-helpdesk/freescout/issues/3894
+        // Remove <!--[if !mso]><!--> and <!--<![endif]--> comments, preserving the data inside
+        //$body = preg_replace('/(<!\-\-\[if [^>]+\]>|<!\[endif\]\-\->)/', '', $body);
+
         return \Helper::purifyHtml($body);
     }
 
@@ -564,7 +582,12 @@ class Thread extends Model
                 return \App\User::getDeletedUser();
             }
         } else {
-            return $this->created_by_customer;
+            // In some cases the created_by_customer can be empty.
+            if ($this->created_by_customer) {
+                return $this->created_by_customer;
+            } else {
+                return \App\Customer::getDummyCustomer();
+            }
         }
     }
 
@@ -650,7 +673,7 @@ class Thread extends Model
                 }
             } elseif ($this->action_type == self::ACTION_TYPE_CUSTOMER_CHANGED) {
                 if ($conversation_number) {
-                    $did_this = __(':person changed the customer to :customer in conversation #:conversation_number', ['customer' => $this->customer->getFullName(true), 'conversation_number' => $conversation_number]);
+                    $did_this = __(':person changed the customer to :customer in conversation #:conversation_number', ['customer' => ($this->customer_cached ? $this->customer_cached->getFullName(true) : ''), 'conversation_number' => $conversation_number]);
                 } else {
                     $customer_name = '';
                     if ($this->customer_cached) {
@@ -807,7 +830,14 @@ class Thread extends Model
         $name = $mailbox->name;
 
         if ($mailbox->from_name == Mailbox::FROM_NAME_CUSTOM && $mailbox->from_name_custom) {
-            $name = $mailbox->from_name_custom;
+            $data = [
+                'mailbox' => $mailbox,
+                'mailbox_from_name' => '', // To avoid recursion.
+                'conversation' => $this->conversation,
+                // If we reach here it means the thread has been created by user.
+                'user' => $this->getCreatedBy(),
+            ];
+            $name = \MailHelper::replaceMailVars($mailbox->from_name_custom, $data, false, true);
         } elseif ($mailbox->from_name == Mailbox::FROM_NAME_USER && $this->getCreatedBy()) {
             $name = $this->getCreatedBy()->getFirstName(true);
         }
@@ -872,6 +902,9 @@ class Thread extends Model
                 $send_status_data = array_merge($send_status_data, $new_data);
             } else {
                 $send_status_data = $new_data;
+            }
+            if (!empty($send_status_data['msg'])) {
+                $send_status_data['msg'] = \MailHelper::sanitizeSmtpStatusMessage($send_status_data['msg']);
             }
             $this->send_status_data = \Helper::jsonEncodeUtf8($send_status_data);
         } else {
@@ -1332,8 +1365,10 @@ class Thread extends Model
         }
         if ($by_user && $this->created_by_user_id == $by_user->id) {
             $name = __('you');
-        } else {
+        } elseif ($this->created_by_user) {
             $name = $this->created_by_user->getFullName();
+        } else {
+            $name = '';
         }
 
         return $name;
@@ -1391,12 +1426,22 @@ class Thread extends Model
      */
     public function fetchBody()
     {
-        $message = \MailHelper::fetchMessage($this->conversation->mailbox, $this->message_id, $this->getMailDate());
+        $mailbox = null;
+
+        // The conversation may has been moved from another mailbox.
+        if (!empty($this->conversation->meta['orig_mailbox_id'])) {
+            $mailbox = Mailbox::find($this->conversation->meta['orig_mailbox_id']);
+        }
+
+        if (!$mailbox) {
+            $mailbox = $this->conversation->mailbox;
+        }
+        $message = \MailHelper::fetchMessage($mailbox, $this->message_id, $this->getMailDate());
 
         // Try without limiting by date.
         // https://github.com/freescout-helpdesk/freescout/issues/3658
         if (!$message) {
-            $message = \MailHelper::fetchMessage($this->conversation->mailbox, $this->message_id);
+            $message = \MailHelper::fetchMessage($mailbox, $this->message_id);
         }
 
         if (!$message) {
@@ -1415,6 +1460,20 @@ class Thread extends Model
     public function parseHeaders()
     {
         return \MailHelper::parseHeaders($this->headers);
+    }
+
+    public function getHeader($header_name)
+    {
+        return \MailHelper::getHeader($this->headers, $header_name);
+    }
+
+    public function getFromHeader()
+    {
+        if (empty($this->headers)) {
+            return '';
+        }
+        preg_match("#From:\s*.*[^\s]*\s*<\s*(.*[^\s])\s*>\s*\n#", $this->headers ?? '', $m);
+        return $m[1] ?? '';
     }
 
     public function getMailDate()
@@ -1527,7 +1586,7 @@ class Thread extends Model
 
     public function canRetrySend()
     {
-        if (!in_array($this->send_status, [SendLog::STATUS_SEND_ERROR, SendLog::STATUS_DELIVERY_ERROR])) {
+        if ($this->isSendStatusSuccess()) {
             return false;
         }
         // Check if failed_job still exists.
@@ -1536,6 +1595,20 @@ class Thread extends Model
         }
 
         return true;
+    }
+
+    public function isSendStatusSuccess()
+    {
+        // We have not tried to send the email yet.
+        if ((int)$this->send_status == 0) {
+            return false;
+        }
+
+        if (!in_array($this->send_status, [SendLog::STATUS_SEND_ERROR, SendLog::STATUS_DELIVERY_ERROR, SendLog::STATUS_SEND_INTERMEDIATE_ERROR])) {
+            return true;
+        }
+        
+        return false;
     }
 
     public function getFailedJobId()

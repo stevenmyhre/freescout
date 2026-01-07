@@ -90,6 +90,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Auth mode
+    |--------------------------------------------------------------------------
+    |
+    | This option have an effect when set to 'XOAUTH2' only.
+    | In other cases Swiftmailer chooses auth mode automatically.
+    |
+    */
+
+    'auth_mode' => env('MAIL_AUTH_MODE', ''),
+
+    /*
+    |--------------------------------------------------------------------------
     | Sendmail System Path
     |--------------------------------------------------------------------------
     |
@@ -123,10 +135,12 @@ return [
     /*
     |--------------------------------------------------------------------------
     | Swiftmailer SMTP timeout.
+    | It should be smaller than "public $timeout" set in mail sending jobs.
+    | In some cases when it's larger than 25 seconds - the timeout simply never happens.
     |--------------------------------------------------------------------------
     |
     */
 
-    'smtp_timeout' => env('MAIL_SMTP_TIMEOUT', 30),
+    'smtp_timeout' => env('MAIL_SMTP_TIMEOUT', 25),
 
 ];

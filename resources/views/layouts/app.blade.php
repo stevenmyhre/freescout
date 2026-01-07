@@ -3,14 +3,14 @@
 <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
     <meta name="robots" content="noindex,nofollow">
     
     <!-- CSRF Token -->
     <meta name="csrf-token" content="{{ csrf_token() }}">
     {!! \Helper::cspMetaTag() !!}
-
-    <title>@if ($__env->yieldContent('title_full'))@yield('title_full') @elseif ($__env->yieldContent('title'))@yield('title') - {{ config('app.name', 'FreeScout') }} @else{{ config('app.name', 'FreeScout') }}@endif</title>
+    @php $app_name = \Eventy::filter('layout.title.name', config('app.name', 'FreeScout')); @endphp
+    <title>@if ($__env->yieldContent('title_full'))@yield('title_full') @elseif ($__env->yieldContent('title'))@yield('title') - {{ $app_name }} @else{{ $app_name }}@endif</title>
 
     <link rel="apple-touch-icon" sizes="180x180" href="{{ asset('apple-touch-icon.png') }}">
     <link rel="shortcut icon" type="image/x-icon" href="@filter('layout.favicon', URL::asset('favicon.ico'))">
@@ -131,7 +131,7 @@
                                     @php
                                         $web_notifications_info = Auth::user()->getWebsiteNotificationsInfo();
                                     @endphp
-                                    <a href="#" class="dropdown-toggle dropdown-toggle-icon @if ($web_notifications_info['unread_count']) @if ($web_notifications_info['unread_count']) has-unread @endif @endif" data-toggle="dropdown" role="button" aria-expanded="false" aria-haspopup="true" v-pre title="{{ __('Notifications') }}">
+                                    <a href="#" class="dropdown-toggle dropdown-toggle-icon @if ($web_notifications_info['unread_count']) @if ($web_notifications_info['unread_count']) has-unread @endif @endif" data-toggle="dropdown" role="button" aria-expanded="false" aria-haspopup="true" aria-label="{{ __('Notifications') }}" v-pre title="{{ __('Notifications') }}">
                                         <i class="glyphicon glyphicon-bell"></i>
                                     </a>
 
@@ -221,7 +221,7 @@
                                         </li>
                                         <li><a href="{{ route('conversations.search', ['f' => ['following' => 'yes']]) }}"><i class="glyphicon glyphicon-chevron-right"></i> {{ __("Conversations I'm following") }}</a></li>
                                         <li><a href="{{ route('conversations.search', ['f' => ['assigned' => Auth::user()->id, 'status' => [App\Conversation::STATUS_ACTIVE, App\Conversation::STATUS_PENDING]]]) }}"><i class="glyphicon glyphicon-chevron-right"></i> {{ __('My open conversations') }}</a></li>
-                                        @if (in_array(Route::currentRouteName(), ['mailboxes.view', 'mailboxes.view.folder', 'conversations.view']))
+                                        @if (in_array(Route::currentRouteName(), ['mailboxes.view', 'mailboxes.view.folder']))
                                             <li><a href="{{ route('conversations.search', ['f' => ['mailbox' => app('request')->id]]) }}"><i class="glyphicon glyphicon-chevron-right"></i> {{ __("All from current mailbox") }}</a></li>
                                         @endif
                                     </ul>

@@ -89,9 +89,9 @@ Route::post('/mailbox/connection-settings/{id}/incoming', 'MailboxesController@c
 Route::get('/mailbox/settings/{id}/auto-reply', 'MailboxesController@autoReply')->name('mailboxes.auto_reply');
 Route::post('/mailbox/settings/{id}/auto-reply', 'MailboxesController@autoReplySave')->name('mailboxes.auto_reply.save');
 Route::post('/mailbox/ajax', ['uses' => 'MailboxesController@ajax', 'laroute' => true])->name('mailboxes.ajax');
-Route::get('/mailbox/oauth/{id}/{provider}', ['uses' => 'MailboxesController@oauth'])->name('mailboxes.oauth');
+Route::get('/mailbox/oauth/{id}/{in_out}/{provider}', ['uses' => 'MailboxesController@oauth'])->name('mailboxes.oauth');
 Route::get('/mailbox/oauth', ['uses' => 'MailboxesController@oauth'])->name('mailboxes.oauth_callback');
-Route::get('/mailbox/oauth-disconnect/{id}/{provider}', ['uses' => 'MailboxesController@oauthDisconnect'])->name('mailboxes.oauth_disconnect');
+Route::get('/mailbox/oauth-disconnect/{id}/{in_out}/{provider}', ['uses' => 'MailboxesController@oauthDisconnect'])->name('mailboxes.oauth_disconnect');
 
 // Customers
 Route::get('/customers/{id}/edit', 'CustomersController@update')->name('customers.update');
@@ -99,6 +99,8 @@ Route::post('/customers/{id}/edit', 'CustomersController@updateSave');
 Route::get('/customers/{id}/', 'CustomersController@conversations')->name('customers.conversations');
 Route::get('/customers/ajax-search', ['uses' => 'CustomersController@ajaxSearch', 'laroute' => true])->name('customers.ajax_search');
 Route::post('/customers/ajax', ['uses' => 'CustomersController@ajax', 'laroute' => true])->name('customers.ajax');
+Route::get('/customers/{id}/merge', 'CustomersController@merge')->name('customers.merge');
+Route::post('/customers/{id}/merge', 'CustomersController@mergeSave');
 
 // Translate
 Route::post('/translations/send', ['uses' => 'TranslateController@postSend', 'middleware' => ['auth', 'roles'], 'roles' => ['admin']])->name('translations.send');

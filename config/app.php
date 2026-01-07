@@ -18,7 +18,7 @@ return [
     | or any other location as required by the application or its packages.
     */
 
-    'version' => '1.8.117',
+    'version' => '1.8.201',
 
     /*
     |--------------------------------------------------------------------------
@@ -98,8 +98,8 @@ return [
     */
 
     'locale'          => env('APP_LOCALE', 'en'),
-    'locales'         => ['en', 'zh-CN', 'hr', 'cs', 'da', 'nl', 'fi', 'fr', 'de', 'it', 'ja', 'ko', 'no', 'fa', 'pl', 'pt-PT', 'pt-BR', 'ru', 'es', 'sk', 'sv'],
-    'locales_rtl'     => ['fa'],
+    'locales'         => ['en', 'ar', 'zh-CN', 'hr', 'cs', 'da', 'nl', 'fi', 'fr', 'de', 'he', 'hu', 'it', 'ja', 'kz', 'ko', 'no', 'fa', 'pl', 'pt-PT', 'pt-BR', 'ro', 'ru', 'es', 'sk', 'sl', 'sv', 'tr', 'uk'],
+    'locales_rtl'     => ['ar', 'fa', 'he'],
     'default_locale'  => 'en',
 
     /*
@@ -170,10 +170,10 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | FreeScout eepository
+    | FreeScout repository
     |-------------------------------------------------------------------------
     */
-    'freescout_repo' => 'https://github.com/freescout-helpdesk/freescout',
+    'freescout_repo' => 'https://freescout.net/github',
 
     /*
     |--------------------------------------------------------------------------
@@ -188,7 +188,7 @@ return [
     | Checks for new jobs every --sleep seconds.
     | If --tries is set and job fails it is being processed right away without any delay.
     | --delay parameter does not work to set delays between retry attempts.
-    | --timeout parameter sets job timeout and is used to avoid queue:work freezing.
+    | --timeout parameter sets job timeout in seconds and is used to avoid queue:work freezing.
     |
     | Jobs sending emails are retried manually in handle().
     | Number of retries is set in each job class.
@@ -219,6 +219,7 @@ return [
     |-------------------------------------------------------------------------
     */
     'fetch_schedule'    => env('APP_FETCH_SCHEDULE', 1),
+    'fetch_unseen'      => env('APP_FETCH_UNSEEN', 1),
 
     /*
     |--------------------------------------------------------------------------
@@ -288,7 +289,7 @@ return [
     |
     |-------------------------------------------------------------------------
     */
-    'no_retry_mail_errors'    => env('APP_NO_RETRY_MAIL_ERRORS', '(no valid recipients|does not comply with RFC|message file too big)'),
+    'no_retry_mail_errors'    => env('APP_NO_RETRY_MAIL_ERRORS', '(no valid recipients|does not comply with RFC|message file too big|malformed address)'),
 
     /*
     |--------------------------------------------------------------------------
@@ -337,6 +338,34 @@ return [
     |-------------------------------------------------------------------------
     */
     'use_mail_date_on_fetching'    => env('APP_USE_MAIL_DATE_ON_FETCHING', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Don't add quotes around date in the SINCE IMAP instruction on fetching.
+    | https://github.com/freescout-help-desk/freescout/issues/4175
+    |
+    |-------------------------------------------------------------------------
+    */
+    'since_without_quotes_on_fetching'    => env('APP_SINCE_WITHOUT_QUOTES_ON_FETCHING', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Emails are fetched in bunches. The larger the bunch's size the more chances
+    | to face "Allowed memory size exhausted" error. The smaller its size the more
+    | connections are made to the mail server and the more time fetching takes.
+    | https://github.com/freescout-help-desk/freescout/issues/4343
+    |
+    |-------------------------------------------------------------------------
+    */
+    'fetching_bunch_size'    => env('APP_FETCHING_BUNCH_SIZE', 100),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Use new POP3 library which does not use PHP IMAP extantion.
+    |
+    |-------------------------------------------------------------------------
+    */
+    'use_new_pop3_lib'    => env('APP_USE_NEW_POP3_LIB', false),
 
      /*
     |--------------------------------------------------------------------------
@@ -391,13 +420,6 @@ return [
     |--------------------------------------------------------------------------
     */
     'custom_mail_headers' => env('APP_CUSTOM_MAIL_HEADERS', ''),
-
-    /*
-    |--------------------------------------------------------------------------
-    | Library used to fetch emails: webklex/laravel-imap, webklex/php-imap
-    |-------------------------------------------------------------------------
-    */
-    'new_fetching_library'    => env('APP_NEW_FETCHING_LIBRARY', false),
 
     /*
     |--------------------------------------------------------------------------
@@ -457,6 +479,14 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Limit non-admin users to only see customers with conversations
+    | in mailboxes they are assigned to. This option does not affect admin users.
+    |-------------------------------------------------------------------------
+    */
+    'limit_user_customer_visibility'    => env('APP_LIMIT_USER_CUSTOMER_VISIBILITY', false),
+
+    /*
+    |--------------------------------------------------------------------------
     | By default X-Frame-Options header is enabled and set to SAMEORIGIN.
     | Via this option you can disable it (APP_X_FRAME_OPTIONS=false) or set custom value:
     | - DENY
@@ -467,11 +497,12 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Enable Content-Security-Policy meta tag to prevent possible XSS attacks.
+    | Content-Security-Policy meta tag parameters.
     |-------------------------------------------------------------------------
     */
-    'csp_enabled'    => env('APP_CSP_ENABLED', true),
+    //'csp_enabled'    => env('APP_CSP_ENABLED', true),
     'csp_script_src' => env('APP_CSP_SCRIPT_SRC', ''),
+    'csp_custom'     => env('APP_CSP_CUSTOM', ''),
 
     /*
     |--------------------------------------------------------------------------
@@ -489,6 +520,15 @@ return [
     |-------------------------------------------------------------------------
     */
     'alternative_reply_separation'    => env('APP_ALTERNATIVE_REPLY_SEPARATION', false),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Comma separated list of white listed hosts.
+    | If some input containing URL becomes blank after saving it - add its host or IP here.
+    | Example: example.org,test.example.org,192.168.1.97
+    |-------------------------------------------------------------------------
+    */
+    'remote_host_white_list'    => env('APP_REMOTE_HOST_WHITE_LIST', ''),
 
     /*
     |--------------------------------------------------------------------------

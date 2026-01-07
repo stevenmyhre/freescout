@@ -81,6 +81,10 @@ class ReplyToCustomer extends Mailable
         if (!empty($new_headers) || $from_alias) {
             $mailbox = $this->mailbox;
             $this->withSwiftMessage(function ($swiftmessage) use ($new_headers, $from_alias, $mailbox, $thread) {
+                \MailHelper::$smtp_mime_message = '';
+
+                $headers = null;
+
                 if (!empty($new_headers)) {
                     if (!empty($new_headers['Message-ID'])) {
                         $swiftmessage->setId($new_headers['Message-ID']);
@@ -111,6 +115,10 @@ class ReplyToCustomer extends Mailable
                             $from_alias_name = $mailbox_mail_from['name'];
                         }
 
+                        if (!$headers) {
+                            $headers = $swiftmessage->getHeaders();
+                        }
+
                         $swift_from = $headers->get('From');
 
                         if ($from_alias_name) {
@@ -125,15 +133,24 @@ class ReplyToCustomer extends Mailable
                     }
                 }
 
+                \Eventy::action('email.reply_to_customer.swiftmessage', $swiftmessage, $from_alias, $thread, $mailbox);
+
+                if ($mailbox->imap_sent_folder) {
+                    \MailHelper::$smtp_mime_message = $swiftmessage->toString();
+                }
+
                 return $swiftmessage;
             });
         }
 
+        $template_html = \Eventy::filter('email.reply_to_customer.template_name_html','emails/customer/reply_fancy');
+        $template_text = \Eventy::filter('email.reply_to_customer.template_name_text','emails/customer/reply_fancy_text');
+
         // from($this->from) Sets only email, name stays empty.
         // So we set from in Mail::setMailDriver
         $message = $this->subject($this->subject)
-                    ->view('emails/customer/reply_fancy')
-                    ->text('emails/customer/reply_fancy_text');
+                    ->view($template_html)
+                    ->text($template_text);
 
         if ($thread->has_attachments) {
             foreach ($thread->attachments as $attachment) {

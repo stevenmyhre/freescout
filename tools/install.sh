@@ -42,7 +42,7 @@ if [ -z "$domain_name" ]; then
     exit;
 fi
 
-mysql_pass=`date +%s | sha256sum | base64 | head -c 9 ; echo`
+mysql_pass=`(date +%s; head -c 10 /dev/urandom;)  | sha256sum | base64 | head -c 9 ; echo`
 
 is_debian=`cat /etc/issue | grep -E ^Debian | wc -l`
 
@@ -62,7 +62,7 @@ else
     # Ubuntu
     sudo apt -q install mysql-server libmysqlclient-dev
 fi
-sudo apt -q install php php-mysqli php-fpm php-mbstring php-xml php-imap php-zip php-gd php-curl php-intl
+sudo apt -q install php-fpm php php-mysqli php-mbstring php-xml php-imap php-zip php-gd php-curl php-intl
 # json extension may be already included in php-fpm
 sudo apt -y -q install php-json
 
@@ -87,6 +87,9 @@ echo "You may see a MySQL privileges error above. Don't worry - the script execu
 #
 printf "\nWhere would you like to install FreeScout? [$install_path]:"
 read confirm_path;
+if [ $confirm_path = "Y" ]; then
+    confirm_path=$install_path;
+fi    
 if [ ! -z "$confirm_path" ]; then
     install_path=`echo $confirm_path | sed 's:/*$::'`;
 fi

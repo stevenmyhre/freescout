@@ -23,9 +23,11 @@ class CustomersController extends Controller
     /**
      * Edit customer.
      */
-    public function update($id)
+    public function update(Request $request, $id)
     {
         $customer = Customer::findOrFail($id);
+
+        $this->checkLimitVisibility($customer);
 
         $customer_emails = $customer->emails;
         if (count($customer_emails)) {
@@ -56,6 +58,8 @@ class CustomersController extends Controller
         $customer = Customer::findOrFail($id);
         $flash_message = '';
 
+        $this->checkLimitVisibility($customer);
+
         // First name or email must be specified
         $validator = Validator::make($request->all(), [
             'first_name' => 'nullable|string|max:255|required_without:emails.0',
@@ -77,7 +81,7 @@ class CustomersController extends Controller
         // Photo
         $validator->after(function ($validator) use ($customer, $request) {
             if ($request->hasFile('photo_url')) {
-                $path_url = $customer->savePhoto($request->file('photo_url')->getRealPath(), $request->file('photo_url')->getMimeType());
+                $path_url = $customer->savePhoto($request->file('photo_url')->getRealPath() ?: $request->file('photo_url')->getPathname(), $request->file('photo_url')->getMimeType());
 
                 if ($path_url) {
                     $customer->photo_url = $path_url;
@@ -126,7 +130,7 @@ class CustomersController extends Controller
                     'email'           => $email->email,
                     'tag_email_begin' => '<strong>',
                     'tag_email_end'   => '</strong>',
-                    'customer'        => $email->customer->getFullName(),
+                    'customer'        => htmlspecialchars($email->customer->getFullName()),
                     'a_begin'         => '<strong><a href="'.$email->customer->url().'" target="_blank">',
                     'a_end'           => '</a></strong>',
                 ]).' ';
@@ -146,6 +150,15 @@ class CustomersController extends Controller
 
         if (isset($request_data['photo_url'])) {
             unset($request_data['photo_url']);
+        }
+        $nonfillable_fields = [
+            'channel',
+            'channel_id',
+        ];
+        foreach ($nonfillable_fields as $field) {
+            if (isset($request_data[$field])) {
+                unset($request_data[$field]);
+            }
         }
 
         $customer->setData($request_data);
@@ -193,6 +206,24 @@ class CustomersController extends Controller
         return redirect()->route('customers.update', ['id' => $id]);
     }
 
+    public function checkLimitVisibility($customer)
+    {
+        $user = auth()->user();
+        $limited_visibility = config('app.limit_user_customer_visibility') && !$user->isAdmin();
+
+        if ($limited_visibility) {
+            $mailbox_ids = $user->mailboxesIdsCanView();
+            
+            $accesible = Conversation::where('customer_id', $customer->id)
+                ->whereIn('conversations.mailbox_id', $mailbox_ids)
+                ->exists();
+
+            if (!$accesible) {
+                \Helper::denyAccess();
+            }
+        }
+    }
+
     /**
      * User mailboxes.
      */
@@ -233,11 +264,18 @@ class CustomersController extends Controller
     {
         $customer = Customer::findOrFail($id);
 
-        $conversations = $customer->conversations()
+        $query = $customer->conversations()
             ->where('customer_id', $customer->id)
             ->whereIn('mailbox_id', auth()->user()->mailboxesIdsCanView())
-            ->orderBy('created_at', 'desc')
-            ->paginate(Conversation::DEFAULT_LIST_SIZE);
+            ->orderBy('created_at', 'desc');
+
+        $user = auth()->user();
+
+        if ($user->canSeeOnlyAssignedConversations()) {
+            $query->where('user_id', '=', $user->id);
+        }
+
+        $conversations = $query->paginate(Conversation::DEFAULT_LIST_SIZE);
 
         return view('customers/conversations', [
             'customer'      => $customer,
@@ -257,6 +295,9 @@ class CustomersController extends Controller
 
         $q = $request->q;
 
+        $user = auth()->user();
+        $limited_visibility = config('app.limit_user_customer_visibility') && !$user->isAdmin();
+
         $join_emails = false;
         if ($request->search_by == 'all' || $request->search_by == 'email' || $request->exclude_email) {
             $join_emails = true;
@@ -264,7 +305,12 @@ class CustomersController extends Controller
 
         $select_list = ['customers.id', 'first_name', 'last_name'];
         if ($join_emails) {
-            $select_list[] = 'emails.email';
+            if ($limited_visibility) {
+                // https://github.com/freescout-help-desk/freescout/issues/5032
+                $select_list[] = \DB::raw('MAX(emails.email)');
+            } else {
+                $select_list[] = 'emails.email';
+            }
         }
         if ($request->show_fields == 'phone') {
             $select_list[] = 'phones';
@@ -279,18 +325,36 @@ class CustomersController extends Controller
             }
         }
 
-        if ($request->search_by == 'all' || $request->search_by == 'email') {
-            $customers_query->where('emails.email', 'like', '%'.$q.'%');
-        }
-        if ($request->exclude_email) {
-            $customers_query->where('emails.email', '<>', $request->exclude_email);
-        }
-        if ($request->search_by == 'all' || $request->search_by == 'name') {
-            $customers_query->orWhere('first_name', 'like', '%'.$q.'%')
-                ->orWhere('last_name', 'like', '%'.$q.'%');
-        }
-        if ($request->search_by == 'phone') {
-            $customers_query->where('customers.phones', 'like', '%'.$q.'%');
+        $customers_query->where(function ($query) use ($q, $request) {
+            if ($request->search_by == 'all' || $request->search_by == 'email') {
+                $query->where('emails.email', 'like', '%'.$q.'%');
+            }
+            if ($request->exclude_email) {
+                $query->where('emails.email', '<>', $request->exclude_email);
+            }
+            if ($request->exclude_id) {
+                $query->where('customers.id', '<>', $request->exclude_id);
+            }
+            if ($request->search_by == 'all' || $request->search_by == 'name') {
+                $query->orWhere('first_name', 'like', '%'.$q.'%')
+                    ->orWhere('last_name', 'like', '%'.$q.'%')
+                    ->orWhere(\Helper::isPgSql() ? \DB::raw('(first_name || \' \' || last_name)') : \DB::raw('CONCAT(first_name, " ", last_name)'), 'like', '%'.$q.'%');
+            }
+            if ($request->search_by == 'phone') {
+                $phone_numeric = \Helper::phoneToNumeric($q);
+                if (!$phone_numeric) {
+                    $phone_numeric = $q;
+                }
+                $query->where('customers.phones', 'like', '%'.$phone_numeric.'%');
+            }
+        });
+
+        if ($limited_visibility) {
+            $mailbox_ids = $user->mailboxesIdsCanView();
+            
+            $customers_query->join('conversations', 'conversations.customer_id', '=', 'customers.id');
+            $customers_query->whereIn('conversations.mailbox_id', $mailbox_ids);
+            $customers_query->groupby('customers.id');
         }
 
         $customers = $customers_query->paginate(20);
@@ -311,7 +375,8 @@ class CustomersController extends Controller
                         // Get phone which matches
                         $phones = $customer->getPhones();
                         foreach ($phones as $phone) {
-                            if (strstr($phone['value'], $q)) {
+                            $phone_numeric = \Helper::phoneToNumeric($q);
+                            if (strstr($phone['value'], $q) || strstr($phone['n'] ?? '', $phone_numeric)) {
                                 $text = $phone['value'];
                                 if ($customer->getFullName()) {
                                     $text .= ' — '.$customer->getFullName();
@@ -333,7 +398,8 @@ class CustomersController extends Controller
                 if (!empty($request->use_id)) {
                     $id = $customer->id;
                 } else {
-                    $id = $customer->email;
+                    // https://github.com/freescout-helpdesk/freescout/issues/4057
+                    $id = $customer->email ?? $customer->getMainEmail();
                 }
             }
             $response['results'][] = [
@@ -361,14 +427,21 @@ class CustomersController extends Controller
 
         switch ($request->action) {
 
-            // Change conversation user
+            // Change conversation customer.
             case 'create':
-                // First name or email must be specified
-                $validator = Validator::make($request->all(), [
+                $validator_config = [
                     'first_name' => 'required|string|max:255',
                     'last_name'  => 'nullable|string|max:255',
                     'email'      => 'required|email|unique:emails,email',
-                ]);
+                ];
+
+                $limited_visibility = config('app.limit_user_customer_visibility') && !$user->isAdmin();
+                if ($limited_visibility) {
+                    $validator_config['email'] = 'required|email';
+                }
+
+                // First name or email must be specified.
+                $validator = Validator::make($request->all(), $validator_config);
 
                 if ($validator->fails()) {
                     foreach ($validator->errors()->getMessages()as $errors) {
@@ -410,5 +483,44 @@ class CustomersController extends Controller
         }
 
         return \Response::json($response);
+    }
+
+    public function merge(Request $request, $id)
+    {
+        $customer = Customer::findOrFail($id);
+
+        // $customers = Customer::where('id', '!=', $id)
+        //     ->orderBy('first_name')
+        //     ->orderBy('last_name')
+        //     ->get();
+
+        return view('customers/merge', ['customer' => $customer]);
+    }
+
+    /**
+     * Merge handling function.
+     */
+    public function mergeSave(Request $request, $id)
+    {
+        $request->validate([
+            'customer2_id' => 'required|exists:customers,id|not_in:'.$id,
+            //'keep_attributes' => 'array'
+        ], [], [
+            'customer2_id' => __('Merge With')
+        ]);
+
+        $customer = Customer::findOrFail($id);
+        $customer2 = Customer::find($request->customer2_id);
+
+        // Ensure customers are different
+        if ($id === $customer2->id) {
+            return redirect()->back()->with('error', __('Cannot merge the same customer'));
+        }
+
+        $customer->mergeWith($customer2/*, $request->keep_attributes ?? []*/);
+
+        \Session::flash('flash_success_floating', __('Customers merged successfully'));
+
+        return redirect()->route('customers.update', ['id' => $id]);
     }
 }

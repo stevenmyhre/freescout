@@ -188,10 +188,16 @@ return [
     | take place, and can be used to mitigate CSRF attacks. By default, we
     | do not enable this as other CSRF protection services are in place.
     |
-    | Supported: "lax", "strict"
+    | Supported: "lax", "strict", "none"
+    |
+    | When set to "lax" for example the SSO auth does not work: 
+    | https://github.com/freescout-help-desk/freescout/issues/4750
+    | 
+    | If set to "none" the "secure" flag should be set:
+    | https://github.com/freescout-help-desk/freescout/issues/4769
     |
     */
 
-    'same_site' => null,
+    'same_site' => env('SESSION_SAME_SITE', null),
 
 ];

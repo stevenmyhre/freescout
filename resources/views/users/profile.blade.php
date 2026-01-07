@@ -95,7 +95,7 @@
                         <label for="email" class="col-sm-2 control-label">{{ __('Email') }}</label>
 
                         <div class="col-sm-6">
-                            <input id="email" type="email" class="form-control input-sized" name="email" value="{{ old('email', $user->email) }}" maxlength="100" required autofocus>
+                            <input id="email" type="email" class="form-control input-sized @if (!auth()->user()->isAdmin()) disabled @endif>" name="email" value="{{ old('email', $user->email) }}" maxlength="100" required autofocus @if (!auth()->user()->isAdmin()) readonly @endif>
 
                             @include('partials/field_error', ['field'=>'email'])
                         </div>
@@ -108,7 +108,7 @@
                             <div class="flexy">
                                 <input id="emails" type="text" class="form-control input-sized" name="emails" value="{{ old('emails', $user->emails) }}" placeholder="{{ __('(optional)') }}">
 
-                                <i class="glyphicon glyphicon-info-sign icon-info" data-toggle="popover" data-trigger="hover" data-html="true" data-placement="left" data-title="{{ __('Alternate Emails') }}" data-content="{{ __("Comma separated list off email addresses from which user can reply to email notifications in addition to user's main Email") }}"></i>
+                                <i class="glyphicon glyphicon-info-sign icon-info" data-toggle="popover" data-trigger="hover" data-html="true" data-placement="left" data-title="{{ __('Alternate Emails') }}" data-content="{{ __("Comma separated list of email addresses from which user can reply to email notifications in addition to user's main Email") }}"></i>
                             </div>
 
                             @include('partials/field_error', ['field'=>'emails'])

@@ -15,6 +15,8 @@
 
 <div class="container">
 
+    @action('system.status.before_info_table')
+
     <h3 id="app">{{ __('Info') }}</h3>
 
     <table class="table table-dark-header table-bordered table-responsive">
@@ -44,10 +46,10 @@
             </tr>
             <tr>
                 <th>{{ __('Date & Time') }}</th>
-                <td class="table-main-col">{{ App\User::dateFormat(new Illuminate\Support\Carbon()) }}</td>
+                <td class="table-main-col">{{ App\User::dateFormat(new Illuminate\Support\Carbon(), 'M j, Y H:i', null, true, false) }}</td>
             </tr>
             <tr>
-                <th>{{ __('Timezone') }}</th>
+                <th>{{ __('Timezone') }} (.env)</th>
                 <td class="table-main-col">{{ \Config::get('app.timezone') }} (GMT{{ date('O') }})</td>
             </tr>
             <tr>
@@ -62,7 +64,7 @@
                     <th>Proxy</th>
                     <td class="table-main-col">
                         <div @if (!$cloudflare_is_used) class="alert alert-warning alert-narrow margin-bottom-0" @endif>
-                            @if (!$cloudflare_is_used)<i class="glyphicon glyphicon-exclamation-sign"></i> @endif{{ 'CloudFlare' }} (<a href="https://github.com/freescout-helpdesk/freescout/wiki/Installation-Guide#103-cloudflare" target="_blank">{{ __('read more') }}</a>)
+                            @if (!$cloudflare_is_used)<i class="glyphicon glyphicon-exclamation-sign"></i> @endif{{ 'CloudFlare' }} (<a href="{{ config('app.freescout_repo') }}/wiki/Installation-Guide#103-cloudflare" target="_blank">{{ __('read more') }}</a>)
                         </div>
                     </td>
                 </tr>
@@ -106,12 +108,14 @@
         </tbody>
     </table>
 
+    @action('system.status.after_info_table')
+
     <h3 id="php">{{ __('PHP Extensions') }}</h3>
     <table class="table table-dark-header table-bordered table-responsive table-narrow">
         <tbody>
             @foreach ($php_extensions as $extension_name => $extension_status)
                 <tr>
-                    <th>{{ $extension_name }}@if ($extension_name == 'intl' && !$extension_status) {{ __('(optional)') }}@endif</th>
+                    <th>{{ $extension_name }}@if (!$extension_status && in_array(strtolower($extension_name), ['intl', 'imap'])) {{ __('(optional)') }}@endif</th>
                     <td class="table-main-col">
                         @if ($extension_status)
                             <strong class="text-success">OK</strong>
@@ -123,6 +127,8 @@
             @endforeach
         </tbody>
     </table>
+
+    @action('system.status.after_php_extensions')
 
     <h3 id="php">{{ __('Functions') }}</h3>
     <table class="table table-dark-header table-bordered table-responsive table-narrow">
@@ -142,8 +148,10 @@
         </tbody>
     </table>
 
+    @action('system.status.after_functions')
+
     <h3 id="permissions">{{ __('Permissions') }}</h3>
-    {!! __('These folders must be writable by web server user (:user).', ['user' => '<strong>'.get_current_user().'</strong>']) !!} {{ __('Recommended permissions') }}: <strong>775</strong>
+    {!! __('These folders must be writable by web server user (:user).', ['user' => '<strong>'.(function_exists('get_current_user') ? get_current_user() : '').'</strong>']) !!} {{ __('Recommended permissions') }}: <strong>775</strong>
     <table class="table table-dark-header table-bordered table-responsive table-narrow">
         <tbody>
             @foreach ($permissions as $perm_path => $perm)
@@ -156,7 +164,7 @@
                                 <br/>
                                 <span class="text-danger">{{ $non_writable_cache_file }}</span>
                                 <br/><br/>
-                                {{ __('Run the following command') }} (<a href="https://github.com/freescout-helpdesk/freescout/wiki/Installation-Guide#6-configuring-web-server" target="_blank">{{ __('read more') }}</a>):<br/>
+                                {{ __('Run the following command') }} (<a href="{{ config('app.freescout_repo') }}/wiki/Installation-Guide#6-configuring-web-server" target="_blank">{{ __('read more') }}</a>):<br/>
                                 <code>sudo chown -R www-data:www-data {{ base_path() }}</code>
                             @elseif (!$perm['status'])
                                 <strong class="text-danger">{{ __('Not writable') }} @if ($perm['value'])({{ $perm['value'] }})@endif</strong>
@@ -170,7 +178,7 @@
                                 <strong class="text-danger">{{ __('Not writable') }} @if ($perm['value'])({{ $perm['value'] }})@endif</strong>
 
                                 <br/><br/>
-                                {{ __('Run the following command') }} (<a href="https://github.com/freescout-helpdesk/freescout/wiki/Installation-Guide#6-configuring-web-server" target="_blank">{{ __('read more') }}</a>):<br/>
+                                {{ __('Run the following command') }} (<a href="{{ config('app.freescout_repo') }}/wiki/Installation-Guide#6-configuring-web-server" target="_blank">{{ __('read more') }}</a>):<br/>
                                 <code>sudo chown -R www-data:www-data {{ base_path() }}</code>
                             @endif
                         @endif
@@ -210,6 +218,8 @@
         @include('modules/partials/invalid_symlinks')
     @endif
 
+    @action('system.status.after_permissions')
+
     <h3 id="cron" class="margin-top-40">Cron Commands</h3>
     <p>
         {!! __('Make sure that you have the following line in your crontab:') !!}<br/>
@@ -234,6 +244,8 @@
         </tbody>
     </table>
 
+    @action('system.status.after_cron_commands')
+
     <h3 id="jobs" class="margin-top-40">{{ __('Background Jobs') }}</h3>
     @if (count($queued_jobs) || count($failed_jobs))
         {{ __('Queued and failed jobs are cleaned automatically once in a while. No need to worry or delete them manually.') }}
@@ -251,70 +263,72 @@
                             @php
                                 $payload = $job->getPayloadDecoded();
                             @endphp
-                            <table class="table">
-                                <tbody>
-                                    <tr>
-                                        <th>{{ $loop->index+1 }}. {{ $payload['displayName'] }}</th>
-                                        <th>
-                                            <form action="{{ route('system.action') }}" method="POST" class="text-right">
-                                                {{ csrf_field() }}
+                            @if ($payload)
+                                <table class="table">
+                                    <tbody>
+                                        <tr>
+                                            <th>{{ $loop->index+1 }}. {{ $payload['displayName'] }}</th>
+                                            <th>
+                                                <form action="{{ route('system.action') }}" method="POST" class="text-right">
+                                                    {{ csrf_field() }}
 
-                                                <input type="hidden" name="job_id" value="{{ $job->id }}" />
+                                                    <input type="hidden" name="job_id" value="{{ $job->id }}" />
 
-                                                <button type="submit" name="action" value="cancel_job" class="btn btn-default btn-xs margin-left-10">{{ __('Cancel') }}</button>
+                                                    <button type="submit" name="action" value="cancel_job" class="btn btn-default btn-xs margin-left-10">{{ __('Cancel') }}</button>
+                                                    @if ($job->attempts > 0)
+                                                        <button type="submit" name="action" value="retry_job" class="btn btn-primary btn-xs"><i class="glyphicon glyphicon-repeat"></i> {{ __('Retry') }}</button>
+                                                    @endif
+                                                </form>
+                                            </th>
+                                        </tr>
+                                        <tr>
+                                            <td>{{ __('Queue') }}</td>
+                                            <td>{{ $job->queue }}</td>
+                                        </tr>
+                                        @if (\Str::startsWith($payload['displayName'], 'App\Jobs\Send'))
+                                            @php
+                                                $command = $job->getCommand();
+                                                $last_thread = null;
+                                                if ($command
+                                                    && !empty($command->conversation)
+                                                    && !empty($command->threads)
+                                                ) {
+                                                    $last_thread = \App\Thread::getLastThread($command->threads);
+                                                }
+                                            @endphp
+                                            @if (!empty($last_thread))
+                                                <tr>
+                                                    <td>{{ __('Message') }}</td>
+                                                    <td><a href="{{ route('conversations.view', ['id' => $last_thread->conversation_id]) }}#thread-{{ $last_thread->id }}" target="_blank">#{{ $command->conversation->number }}</a></td>
+                                                </tr>
+                                            @endif
+                                        @endif
+                                        <tr>
+                                            <td>{{ __('Attempts') }}</td>
+                                            <td>
+                                                @if ($job->attempts > 0)<strong class="text-danger">@endif
+                                                    {{ $job->attempts }}
                                                 @if ($job->attempts > 0)
-                                                    <button type="submit" name="action" value="retry_job" class="btn btn-primary btn-xs"><i class="glyphicon glyphicon-repeat"></i> {{ __('Retry') }}</button>
+                                                    </strong>
                                                 @endif
-                                            </form>
-                                        </th>
-                                    </tr>
-                                    <tr>
-                                        <td>{{ __('Queue') }}</td>
-                                        <td>{{ $job->queue }}</td>
-                                    </tr>
-                                    @if (\Str::startsWith($payload['displayName'], 'App\Jobs\Send'))
-                                        @php
-                                            $command = $job->getCommand();
-                                            $last_thread = null;
-                                            if ($command
-                                                && !empty($command->conversation)
-                                                && !empty($command->threads)
-                                            ) {
-                                                $last_thread = \App\Thread::getLastThread($command->threads);
-                                            }
-                                        @endphp
-                                        @if (!empty($last_thread))
+                                                @if ($job->attempts > 0 && !empty($last_thread))
+                                                     &nbsp;<small>(<a href="{{ route('logs', ['name' => 'out_emails', 'thread_id' => $last_thread->id]) }}" target="_blank">{{ __('View log') }}</a>)</small>
+                                                @endif
+                                            </td>
+                                        </tr>
+                                        <tr>
+                                            <td>{{ __('Created At') }}</td>
+                                            <td>{{  App\User::dateFormat($job->created_at) }}</td>
+                                        </tr>
+                                        @if ($job->attempts > 0)
                                             <tr>
-                                                <td>{{ __('Message') }}</td>
-                                                <td><a href="{{ route('conversations.view', ['id' => $last_thread->conversation_id]) }}#thread-{{ $last_thread->id }}" target="_blank">#{{ $command->conversation->number }}</a></td>
+                                                <td>{{ __('Next Attempt') }}</td>
+                                                <td>{{  App\User::dateFormat($job->available_at) }}</td>
                                             </tr>
                                         @endif
-                                    @endif
-                                    <tr>
-                                        <td>{{ __('Attempts') }}</td>
-                                        <td>
-                                            @if ($job->attempts > 0)<strong class="text-danger">@endif
-                                                {{ $job->attempts }}
-                                            @if ($job->attempts > 0)
-                                                </strong>
-                                            @endif
-                                            @if ($job->attempts > 0 && !empty($last_thread))
-                                                 &nbsp;<small>(<a href="{{ route('logs', ['name' => 'out_emails', 'thread_id' => $last_thread->id]) }}" target="_blank">{{ __('View log') }}</a>)</small>
-                                            @endif
-                                        </td>
-                                    </tr>
-                                    <tr>
-                                        <td>{{ __('Created At') }}</td>
-                                        <td>{{  App\User::dateFormat($job->created_at) }}</td>
-                                    </tr>
-                                    @if ($job->attempts > 0)
-                                        <tr>
-                                            <td>{{ __('Next Attempt') }}</td>
-                                            <td>{{  App\User::dateFormat($job->available_at) }}</td>
-                                        </tr>
-                                    @endif
-                                </tbody>
-                            </table>
+                                    </tbody>
+                                </table>
+                            @endif
                         @endforeach
                     </div>
                 </td>
@@ -392,7 +406,12 @@
         </tbody>
     </table>
 
+    @action('system.status.after_background_jobs')
+
 </div>
+
+@action('system.status.after_content')
+
 @endsection
 
 @section('javascript')

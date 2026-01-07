@@ -2,7 +2,6 @@
 
 namespace App\Http\Controllers;
 
-use App\Events\UserDeleted;
 use App\Folder;
 use App\Mailbox;
 use App\Subscription;
@@ -86,8 +85,16 @@ class UsersController extends Controller
                         ->withInput();
         }
 
+        $data = [
+            'first_name' => $request->first_name,
+            'last_name' => $request->last_name,
+            'email' => $request->email,
+        ];
+
         $user = new User();
-        $user->fill($request->all());
+
+        $user->fill($data);
+
         if (!$auth_user->can('changeRole', $user)) {
             $user->role = User::ROLE_USER;
         }
@@ -161,6 +168,8 @@ class UsersController extends Controller
         $user = User::findOrFail($id);
         $this->authorize('update', $user);
 
+        $auth_user = auth()->user();
+
         // This is also present in PublicController::userSetup
         $validator = Validator::make($request->all(), [
             'first_name'  => 'required|string|max:20',
@@ -213,7 +222,7 @@ class UsersController extends Controller
         }
 
         // Save language into session.
-        if (auth()->user()->id == $id && $request->locale) {
+        if ($auth_user->id == $id && $request->locale) {
             session()->put('user_locale', $request->locale);
         }
 
@@ -222,7 +231,7 @@ class UsersController extends Controller
         if (isset($request_data['photo_url'])) {
             unset($request_data['photo_url']);
         }
-        if (!auth()->user()->can('changeRole', $user)) {
+        if (!$auth_user->can('changeRole', $user)) {
             unset($request_data['role']);
         }
         if ($user->status != User::STATUS_DELETED) {
@@ -232,11 +241,43 @@ class UsersController extends Controller
                 $request_data['status'] = User::STATUS_ACTIVE;
             }
         }
-        $user->setData($request_data);
 
-        if (empty($request->input('enable_kb_shortcuts'))) {
-            $user->enable_kb_shortcuts = false;
+        // Sanitize $request_data array.
+        // $allowed_fields = [
+        //     'first_name',
+        //     'last_name',
+        //     'email', 
+        //     'emails',
+        //     'job_title',
+        //     'phone',
+        //     'locale',
+        //     'timezone'
+        //     'time_format',
+        //     'photo_url',
+        // ];
+        $admin_fields = [
+            'role',
+            'status',
+            'email',
+        ];
+        $nonfillable_fields = [
+            'type',
+            'password',
+        ];
+        if (!$auth_user->isAdmin()) {
+            foreach ($admin_fields as $field) {
+                if (isset($request_data[$field])) {
+                    unset($request_data[$field]);
+                }
+            }
         }
+        foreach ($nonfillable_fields as $field) {
+            if (isset($request_data[$field])) {
+                unset($request_data[$field]);
+            }
+        }
+
+        $user->setData($request_data);
 
         $user = \Eventy::filter('user.save_profile', $user, $request);
 
@@ -259,7 +300,11 @@ class UsersController extends Controller
 
         $user = User::findOrFail($id);
 
-        $mailboxes = Mailbox::all();
+        if ($user->isDeleted()) {
+            abort(404);
+        }
+
+        $mailboxes = Mailbox::all()->sortBy('name');
 
         $users = $this->getUsersForSidebar($id);
 
@@ -317,6 +362,10 @@ class UsersController extends Controller
         $user = User::findOrFail($id);
         $this->authorize('update', $user);
 
+        if ($user->isDeleted()) {
+            abort(404);
+        }
+        
         $subscriptions = $user->subscriptions()->select('medium', 'event')->get();
 
         $person = '';
@@ -479,106 +528,24 @@ class UsersController extends Controller
                     $response['msg'] = __('User not found');
                 } elseif (!$auth_user->can('delete', $user)) {
                     $response['msg'] = __('Not enough permissions');
+                } elseif ($auth_user->id == $user->id) {
+                    // Do not allow admin delete himself.
+                    $response['msg'] = __('Not enough permissions');
                 }
 
                 // Check if the user is the only one admin
-                if (!$response['msg'] && $user->isAdmin()) {
-                    $admins_count = User::where('role', User::ROLE_ADMIN)->count();
-                    if ($admins_count < 2) {
-                        $response['msg'] = __('Administrator can not be deleted');
-                    }
-                }
+                // - not needed as only admin can delete  users and
+                // current admin can not delete himself.
+                // if (!$response['msg'] && $user->isAdmin()) {
+                //     $admins_count = User::where('role', User::ROLE_ADMIN)->count();
+                //     if ($admins_count < 2) {
+                //         $response['msg'] = __('Administrator can not be deleted');
+                //     }
+                // }
 
                 if (!$response['msg']) {
 
-                    // We have to process conversations one by one to move them to Unassigned folder,
-                    // as conversations may be in different mailboxes
-                    // $user->conversations()->update(['user_id' => null, 'folder_id' => ]);
-                    $mailbox_unassigned_folders = [];
-
-                    $user->conversations->each(function ($conversation) use ($auth_user, $request) {
-                        // We don't fire ConversationUserChanged event to avoid sending notifications to users
-                        if (!empty($request->assign_user) 
-                            && !empty($request->assign_user[$conversation->mailbox_id]) 
-                            && (int) $request->assign_user[$conversation->mailbox_id] != -1
-                        ) {
-                            // Set assignee.
-                            // In this case conversation stays assigned, just assignee changes.
-                            $conversation->user_id = $request->assign_user[$conversation->mailbox_id];
-
-                        } else {
-
-                            // Make convesation Unassigned.
-                            
-                            // Unset assignee.
-                            // Maybe use changeUser() here.
-                            $conversation->user_id = null;
-
-                            if ($conversation->isPublished()
-                                && ($conversation->isActive() || $conversation->isPending())
-                            ) {
-                                // Change conversation folder to UNASSIGNED.
-                                $folder_id = null;
-                                if (!empty($mailbox_unassigned_folders[$conversation->mailbox_id])) {
-                                    $folder_id = $mailbox_unassigned_folders[$conversation->mailbox_id];
-                                } else {
-                                    $folder = $conversation->mailbox->folders()
-                                        ->where('type', Folder::TYPE_UNASSIGNED)
-                                        ->first();
-
-                                    if ($folder) {
-                                        $folder_id = $folder->id;
-                                        $mailbox_unassigned_folders[$conversation->mailbox_id] = $folder_id;
-                                    }
-                                }
-                                if ($folder_id) {
-                                    $conversation->folder_id = $folder_id;
-                                }
-                            }
-                        }
-
-                        $conversation->save();
-
-                        // Create lineitem thread
-                        $thread = new Thread();
-                        $thread->conversation_id = $conversation->id;
-                        $thread->user_id = $conversation->user_id;
-                        $thread->type = Thread::TYPE_LINEITEM;
-                        $thread->state = Thread::STATE_PUBLISHED;
-                        $thread->status = Thread::STATUS_NOCHANGE;
-                        $thread->action_type = Thread::ACTION_TYPE_USER_CHANGED;
-                        $thread->source_via = Thread::PERSON_USER;
-                        $thread->source_type = Thread::SOURCE_TYPE_WEB;
-                        $thread->customer_id = $conversation->customer_id;
-                        $thread->created_by_user_id = $auth_user->id;
-                        $thread->save();
-                    });
-
-                    // Recalculate counters for folders
-                    //if ($user->isAdmin()) {
-                    // Admin has access to all mailboxes
-                    Mailbox::all()->each(function ($mailbox) {
-                        $mailbox->updateFoldersCounters();
-                    });
-                    // } else {
-                    //     $user->mailboxes->each(function ($mailbox) {
-                    //         $mailbox->updateFoldersCounters();
-                    //     });
-                    // }
-
-                    // Disconnect user from mailboxes.
-                    $user->mailboxes()->sync([]);
-                    $user->folders()->delete();
-
-                    $user->status = \App\User::STATUS_DELETED;
-                    // Update email.
-                    $email_suffix = User::EMAIL_DELETED_SUFFIX.date('YmdHis');
-                    // We have to truncate email to avoid "Data too long" error.
-                    $user->email = mb_substr($user->email, 0, User::EMAIL_MAX_LENGTH - mb_strlen($email_suffix)).$email_suffix;
-
-                    $user->save();
-
-                    event(new UserDeleted($user, $auth_user));
+                    $user->deleteUser($auth_user, $request->assign_user);
 
                     \Session::flash('flash_success_floating', __('User deleted').': '.$user->getFullName());
 
@@ -588,6 +555,7 @@ class UsersController extends Controller
 
             default:
                 $response['msg'] = 'Unknown action';
+		        $response = \Eventy::filter('users.ajax.response_default', $response, $request);
                 break;
         }
 
